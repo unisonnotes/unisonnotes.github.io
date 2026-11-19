@@ -109,13 +109,13 @@ const STEPS = [
   {
     n: "02",
     title: "Share one spine",
-    body: "The spine is the only shared structure: an outline of topics. Type # Topic to add one for everyone. New notes go to the latest topic.",
+    body: "The spine is the only shared structure: an outline of topics. Type #Topic to add one for everyone and ##Subtopic to nest one inside it. Tab nests your bullets.",
     art: "spine",
   },
   {
     n: "03",
     title: "Read the woven doc",
-    body: "Every note snaps onto a section, so the group ends up with one clean doc that credits each writer. No cleanup afterwards.",
+    body: "Every note snaps onto a topic, so the group ends up with one clean doc that credits each writer. No cleanup afterwards.",
     art: "woven",
   },
 ];
@@ -137,8 +137,8 @@ function StepArt({ kind }) {
 const FEATURES = [
   { icon: "git-merge", title: "Duplicates collapse", body: "Matching notes merge into one bullet with a ×N badge. Points only one person caught get a solo marker.", demo: html`<span class="badge badge--dup mono">×3</span><span class="badge badge--solo mono">solo</span>` },
   { icon: "triangle-alert", title: "Conflicts get flagged", body: "Similar notes with different numbers or dates light up, so someone double-checks before the exam.", demo: html`<span class="fx-clash">signed in <mark class="clash">1648</mark> vs <mark class="clash">1658</mark></span>` },
-  { icon: "flame", title: "Gaps glow", body: "Sections with few notes glow on the spine. Anyone can claim one, and everyone sees who's on it.", demo: html`<span class="fx-heat"><i /><i /><i class="hot" /><i /></span>` },
-  { icon: "hash", title: "Hashtags become sections", body: "When two people use the same #tag, it becomes a section and their notes move into it.", demo: html`<span class="tag mono">#photosynthesis</span>` },
+  { icon: "flame", title: "Gaps glow", body: "Topics with few notes glow on the spine. Anyone can claim one, and everyone sees who's on it.", demo: html`<span class="fx-heat"><i /><i /><i class="hot" /><i /></span>` },
+  { icon: "hash", title: "Hashtags become topics", body: "When two people use the same #tag, it becomes a topic and their notes move into it.", demo: html`<span class="tag mono">#photosynthesis</span>` },
   { icon: "clock", title: "Every note is timed", body: "Timestamps on every note mean the spine doubles as a timeline of the lecture or meeting.", demo: html`<span class="mono fx-time">10:02 → 10:41</span>` },
   { icon: "download", title: "Clean export", body: "One doc with credits, as Markdown or PDF. Ready to share with the people who missed it.", demo: html`<span class="mono fx-file">notes.md · notes.pdf</span>` },
 ];

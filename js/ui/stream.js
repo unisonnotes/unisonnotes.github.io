@@ -108,7 +108,7 @@ function TargetPicker({ ctx }) {
     trigger=${(open, toggle) => html`<button class=${"target-btn" + (open ? " is-open" : "")} onClick=${toggle} title="Topic your notes go to">
       <span class="target-ring" />
       <span class="target-label">${label}</span>
-      ${target === "auto" && html`<span class="target-auto mono">latest</span>`}
+      ${target === "auto" && latest && html`<span class="target-auto mono">latest</span>`}
       <${Icon} name="chevron-down" size=${13} />
     </button>`}
     items=${() => [
@@ -121,7 +121,7 @@ function TargetPicker({ ctx }) {
   />`;
 }
 
-function Composer({ ctx, myCount }) {
+function Composer({ ctx }) {
   const { doc, docId, user, resolvedTarget, composerRef, woven } = ctx;
   const [text, setText] = useState("");
   const [sending, setSending] = useState(false);

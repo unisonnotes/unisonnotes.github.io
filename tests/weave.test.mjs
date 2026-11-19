@@ -9,6 +9,9 @@ import {
   toMarkdown,
   parseOutline,
   streamOutline,
+  orderedSections,
+  headingParent,
+  nextOrder,
 } from "../js/weave.js";
 
 const doc = (sections, notes, merges = {}) => ({ meta: { title: "T" }, sections, notes, merges });

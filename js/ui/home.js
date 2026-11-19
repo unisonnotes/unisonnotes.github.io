@@ -143,18 +143,18 @@ function NewDocModal({ template, onClose, onCreate }) {
     </label>
     ${template?.id === "agenda" &&
     html`<label class="field-label">
-      <span>Agenda <small>one section per line</small></span>
+      <span>Agenda <small>one topic per line</small></span>
       <textarea class="field field--area mono" rows="6" placeholder=${"1. Welcome\n2. Budget review\n3. Event planning\n4. Open floor"} value=${agenda} onInput=${(e) => setAgenda(e.target.value)} />
     </label>`}
     ${sections.length > 0 &&
     html`<div class="spine-preview">
-      <div class="kicker">Spine · ${sections.length} sections</div>
+      <div class="kicker">Spine · ${sections.length} topics</div>
       <ol>
         ${sections.map((s, i) => html`<li key=${i}><span class="mono">${String(i + 1).padStart(2, "0")}</span>${s}</li>`)}
       </ol>
     </div>`}
     ${template?.id === "blank" &&
-    html`<p class="hint-line"><${Icon} name="hash" size=${14} /> Anyone can add sections while writing: type <code># Topic</code> in the composer.</p>`}
+    html`<p class="hint-line"><${Icon} name="hash" size=${14} /> Anyone can add topics while writing: type <code>#Topic</code> in the composer, or <code>##Subtopic</code> to nest one.</p>`}
   <//>`;
 }
 

@@ -4,7 +4,7 @@ export const TEMPLATES = [
     id: "blank",
     name: "Blank",
     icon: "file-plus",
-    blurb: "Start empty. Type # Topic to add sections as you go.",
+    blurb: "Start empty. Type #Topic to add topics as you go.",
     sections: [],
   },
   {
@@ -39,7 +39,7 @@ export const TEMPLATES = [
     id: "agenda",
     name: "Paste an agenda",
     icon: "clipboard-list",
-    blurb: "Each line of your agenda becomes a section.",
+    blurb: "Each line of your agenda becomes a topic.",
     sections: null,
   },
 ];
