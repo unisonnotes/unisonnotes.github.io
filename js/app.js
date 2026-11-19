@@ -73,7 +73,9 @@ function App({ backend }) {
 async function boot() {
   const root = document.getElementById("app");
   let backend;
-  if (firebaseConfig.apiKey) {
+  // `?local` runs on this browser's storage even when Firebase is configured (testing).
+  const forceLocal = new URLSearchParams(location.search).has("local");
+  if (firebaseConfig.apiKey && !forceLocal) {
     try {
       const { createFirebaseBackend } = await import("./backend/firebase.js");
       backend = await createFirebaseBackend();

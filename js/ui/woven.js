@@ -4,6 +4,7 @@ import { Icon } from "./icons.js";
 import { Avatar, Menu, toast, ask, clock, timeAgo, colorFor } from "./kit.js";
 import { NoteText } from "./text.js";
 import * as store from "../store.js";
+import { MAX_DEPTH } from "../weave.js";
 
 /** Remember which notes were already on screen so only fresh ones animate in. */
 function useSeen(ids) {
@@ -17,24 +18,29 @@ function useSeen(ids) {
   return fresh;
 }
 
-export function NoteActions({ ctx, note, compact = false, onEdit }) {
+/** Indented section label for menus. */
+export const sectionLabel = (s) => html`<span style=${{ paddingLeft: (s.depth || 0) * 14 + "px" }}>${s.title}</span>`;
+
+export function NoteActions({ ctx, note, compact = false, onEdit, extra = [] }) {
   const { docId, woven, doc } = ctx;
   const merged = doc.merges?.[note.id];
   const move = (sid) =>
     store.moveNote(docId, note.id, sid).then(() => toast(sid ? html`Moved to <b>${doc.sections[sid]?.title}</b>` : "Moved to Unsorted", { icon: "corner-down-left" }));
+  const placed = woven.sectionOfNote.get(note.id) ?? null;
   return html`<${Menu}
     align="right"
-    width=${236}
+    width=${248}
     trigger=${(open, toggle) => html`<button class=${"icon-btn icon-btn--sm note-kebab" + (open ? " is-open" : "")} onClick=${(e) => (e.stopPropagation(), toggle())} aria-label="Note actions">
       <${Icon} name=${compact ? "more-horizontal" : "more-vertical"} size=${15} />
     </button>`}
     items=${() => [
       ...(onEdit ? [{ label: "Edit", icon: "pencil", onSelect: onEdit }] : []),
+      ...extra,
       { label: merged ? "Unmerge" : "Merge into another point…", icon: merged ? "split" : "git-merge", onSelect: () => (merged ? store.unmergeNote(docId, note.id) : ctx.setMergeFrom(note.id)) },
       { sep: true },
       { heading: "Move to" },
-      ...woven.sections.map((s) => ({ label: s.title, icon: "hash", checked: note.sectionId === s.id, onSelect: () => move(s.id) })),
-      { label: "Unsorted", icon: "inbox", checked: !note.sectionId || !doc.sections?.[note.sectionId], onSelect: () => move(null) },
+      ...woven.sections.map((s) => ({ label: sectionLabel(s), icon: "hash", checked: !note.parentId && placed === s.id, onSelect: () => move(s.id) })),
+      { label: "Unsorted", icon: "inbox", checked: !note.parentId && placed === null, onSelect: () => move(null) },
       { sep: true },
       {
         label: "Delete note",
@@ -49,11 +55,13 @@ export function NoteActions({ ctx, note, compact = false, onEdit }) {
 }
 
 function Point({ ctx, item, fresh, index }) {
-  const { user, nameOf, showTimes, showConflicts, mergeFrom, doc, docId, query, now } = ctx;
+  const { user, nameOf, showTimes, showConflicts, mergeFrom, doc, docId, query, now, canEdit } = ctx;
   const [open, setOpen] = useState(false);
   const many = item.authors.length > 1;
   const conflict = showConflicts && item.conflicts.length > 0;
   const pickable = mergeFrom && !item.notes.some((n) => n.id === mergeFrom);
+  const isFresh = item.notes.some((n) => fresh.has(n.id));
+  const kids = filterItems(item.children, query);
 
   const onClick = () => {
     if (mergeFrom) {
@@ -67,7 +75,7 @@ function Point({ ctx, item, fresh, index }) {
 
   return html`<li
     id=${"pt-" + item.id}
-    class=${"pt" + (fresh ? " is-new" : "") + (conflict ? " is-conflict" : "") + (open ? " is-open" : "") + (pickable ? " is-pickable" : "") + (item.authors.includes(user.uid) ? " is-mine" : "")}
+    class=${`pt pt--d${Math.min(item.depth, 3)}` + (isFresh ? " is-new" : "") + (conflict ? " is-conflict" : "") + (open ? " is-open" : "") + (pickable ? " is-pickable" : "") + (item.authors.includes(user.uid) ? " is-mine" : "")}
     style=${{ "--i": index }}
   >
     <div class="pt-row" onClick=${onClick}>
@@ -78,6 +86,12 @@ function Point({ ctx, item, fresh, index }) {
         ${item.solo && html`<span class="badge badge--solo mono" title="Only one person wrote this point">solo</span>`}
         ${conflict && html`<span class="badge badge--conflict mono" title="A similar note has different numbers or dates"><${Icon} name="triangle-alert" size=${11} /> check</span>`}
       </div>
+      ${canEdit &&
+      !mergeFrom &&
+      item.depth < MAX_DEPTH &&
+      html`<button class="pt-add" title="Add a sub-point under this" aria-label="Add a sub-point" onClick=${(e) => (e.stopPropagation(), ctx.nestUnder(item.rep.id))}>
+        <${Icon} name="plus" size=${13} />
+      </button>`}
       <span class="pt-credit" title=${item.authors.map(nameOf).join(", ")}>
         ${item.authors.slice(0, 3).map((uid) => html`<span key=${uid} class="pt-dot" style=${{ "--who": colorFor(uid) }}>${nameOf(uid)[0]}</span>`)}
         ${item.authors.length > 3 && html`<span class="pt-dot pt-dot--more">+${item.authors.length - 3}</span>`}
@@ -98,7 +112,7 @@ function Point({ ctx, item, fresh, index }) {
             </div>
             <p><${NoteText} text=${n.text} clash=${showConflicts ? item.clashNums : null} /></p>
           </div>
-          ${n.author === user.uid && ctx.canEdit && html`<${NoteActions} ctx=${ctx} note=${n} compact />`}
+          ${n.author === user.uid && canEdit && html`<${NoteActions} ctx=${ctx} note=${n} compact />`}
         </div>`,
       )}
       ${item.conflicts.map((c) => {
@@ -117,6 +131,8 @@ function Point({ ctx, item, fresh, index }) {
         </button>`;
       })}
     </div>`}
+    ${kids.length > 0 &&
+    html`<ul class="pts pts--sub">${kids.map((k, i) => html`<${Point} key=${k.id} ctx=${ctx} item=${k} index=${i} fresh=${fresh} />`)}</ul>`}
   </li>`;
 }
 
@@ -137,17 +153,21 @@ function GapCallout({ ctx, s }) {
   </div>`;
 }
 
-function SectionBlock({ ctx, s, index, fresh }) {
-  const { showHeat, showTimes, writersIn, canEdit, resolvedTarget, query } = ctx;
+const HEADINGS = ["h2", "h3", "h4"];
+
+function SectionBlock({ ctx, s, fresh }) {
+  const { showHeat, showTimes, writersIn, canEdit, resolvedTarget, query, woven } = ctx;
   const writers = writersIn(s.id);
-  const items = query ? s.items.filter((it) => it.notes.some((n) => n.text.toLowerCase().includes(query.trim().toLowerCase()))) : s.items;
+  const items = filterItems(s.items, query);
+  const hasSubtopics = woven.sections.some((x) => x.parentId === s.id);
   if (query && !items.length) return null;
   const hot = showHeat && s.heat >= 0.5;
   const isTarget = canEdit && resolvedTarget === s.id;
-  return html`<section id=${"sec-" + s.id} class=${"w-sec" + (hot ? " is-hot" : "")} style=${{ "--heat-amt": showHeat ? s.heat : 0 }} data-sid=${s.id}>
+  const H = HEADINGS[Math.min(s.depth, 2)];
+  return html`<section id=${"sec-" + s.id} class=${`w-sec w-sec--d${Math.min(s.depth, 2)}` + (hot ? " is-hot" : "")} style=${{ "--heat-amt": showHeat ? s.heat : 0 }} data-sid=${s.id}>
     <header class="w-sec-head">
-      <span class="w-sec-num mono">${String(index + 1).padStart(2, "0")}</span>
-      <h2>${s.title}</h2>
+      <span class="w-sec-num mono">${s.number}</span>
+      <${H}>${s.title}<//>
       ${isTarget && html`<span class="target-chip mono"><span class="dot-live" /> writing here</span>`}
       <span class="w-sec-meta mono">
         ${writers.length > 0 &&
@@ -161,9 +181,17 @@ function SectionBlock({ ctx, s, index, fresh }) {
     </header>
     ${hot && html`<${GapCallout} ctx=${ctx} s=${s} />`}
     ${items.length
-      ? html`<ul class="pts">${items.map((it, i) => html`<${Point} key=${it.id} ctx=${ctx} item=${it} index=${i} fresh=${it.notes.some((n) => fresh.has(n.id))} />`)}</ul>`
-      : !hot && html`<p class="w-empty">${canEdit ? html`No notes yet. <button class="link-btn" onClick=${() => ctx.focusComposer(s.id)}>Write here</button>` : "No notes yet."}</p>`}
+      ? html`<ul class="pts">${items.map((it, i) => html`<${Point} key=${it.id} ctx=${ctx} item=${it} index=${i} fresh=${fresh} />`)}</ul>`
+      : !hot && !hasSubtopics && html`<p class="w-empty">${canEdit ? html`No notes yet. <button class="link-btn" onClick=${() => ctx.focusComposer(s.id)}>Write here</button>` : "No notes yet."}</p>`}
   </section>`;
+}
+
+/** Keep points whose text, or any sub-point's text, matches the filter. */
+function filterItems(items, query) {
+  const q = query?.trim().toLowerCase();
+  if (!q) return items;
+  const hit = (it) => it.notes.some((n) => n.text.toLowerCase().includes(q)) || it.children.some(hit);
+  return items.filter(hit);
 }
 
 export function WovenPage({ ctx }) {
@@ -192,6 +220,7 @@ export function WovenPage({ ctx }) {
   const contributors = people.filter((p) => counts.has(p.uid)).sort((a, b) => counts.get(b.uid) - counts.get(a.uid));
   const lastAt = Math.max(0, ...Object.values(doc.notes || {}).map((n) => n.createdAt || 0));
   const empty = !woven.sections.length && !woven.unsorted.length;
+  const targetSection = woven.sections.find((s) => s.id === ctx.resolvedTarget);
 
   return html`<article class="page" ref=${pageRef}>
     <div class="page-kicker mono">
@@ -219,12 +248,17 @@ export function WovenPage({ ctx }) {
       </div>
       <h3>The page is empty, for now</h3>
       <p>${canEdit
-        ? html`Start the spine with <code># First topic</code> in your composer, then write notes. Everyone's notes weave in here as they press Enter.`
+        ? html`Start a topic with <code>#Topic</code> in your composer, then write notes. Press <kbd class="kbd">Tab</kbd> to nest a bullet under the one before it. Everyone's notes weave in here as they press Enter.`
         : "Notes appear here as editors write them."}</p>
       ${canEdit && html`<button class="btn btn--primary" onClick=${() => ctx.focusComposer()}><${Icon} name="notebook-pen" /> Start writing <kbd class="kbd">/</kbd></button>`}
     </div>`}
 
-    ${woven.sections.map((s, i) => html`<${SectionBlock} key=${s.id} ctx=${ctx} s=${s} index=${i} fresh=${fresh} />`)}
+    ${woven.sections.map((s) => html`<${SectionBlock} key=${s.id} ctx=${ctx} s=${s} fresh=${fresh} />`)}
+
+    ${canEdit && woven.sections.length > 0 && html`<div class="add-topic-row">
+      <button class="add-topic" onClick=${() => ctx.startTopic(0)}><${Icon} name="plus" size=${14} /> New topic</button>
+      ${targetSection && targetSection.depth < 2 && html`<button class="add-topic" onClick=${() => ctx.startTopic(targetSection.depth + 1)}><${Icon} name="corner-down-left" size=${14} /> Subtopic in “${targetSection.title}”</button>`}
+    </div>`}
 
     ${woven.unsorted.length > 0 &&
     html`<section id="sec-unsorted" class="w-sec w-sec--unsorted" data-sid="">
@@ -233,10 +267,10 @@ export function WovenPage({ ctx }) {
         <h2>Unsorted</h2>
         <span class="w-sec-meta mono">${woven.unsorted.length} waiting</span>
       </header>
-      <p class="w-hint">Notes that don't belong to a section yet. Use <b>Move to</b> on your own notes, or add a section with <code># Topic</code>.</p>
+      <p class="w-hint">Notes that don't belong to a topic yet. Use <b>Move to</b> on your own notes, or start a topic with <code>#Topic</code>.</p>
       <ul class="pts">
-        ${(query ? woven.unsorted.filter((it) => it.notes.some((n) => n.text.toLowerCase().includes(query.trim().toLowerCase()))) : woven.unsorted).map(
-          (it, i) => html`<${Point} key=${it.id} ctx=${ctx} item=${it} index=${i} fresh=${it.notes.some((n) => fresh.has(n.id))} />`,
+        ${filterItems(woven.unsorted, query).map(
+          (it, i) => html`<${Point} key=${it.id} ctx=${ctx} item=${it} index=${i} fresh=${fresh} />`,
         )}
       </ul>
     </section>`}

@@ -21,11 +21,15 @@ export function extractTags(text) {
   return [...tags];
 }
 
-/** `# Topic` makes a section for everyone; anything else is a note. */
+/**
+ * A message that starts with "#" is a heading for everyone: "#Topic" (or "# Topic"),
+ * "##Subtopic" under the current topic, "###" one level deeper. Hashtags anywhere
+ * else in a note are tags. Everything else is a note.
+ */
 export function parseInput(raw) {
   const text = raw.trim();
-  const heading = /^#\s+(.+)$/s.exec(text);
-  if (heading && !heading[1].includes("\n")) return { kind: "section", title: heading[1].trim() };
+  const heading = /^(#{1,3})\s*([^#\s][^\n]*)$/.exec(text);
+  if (heading) return { kind: "section", title: heading[2].trim(), level: heading[1].length - 1 };
   return { kind: "note", text, tags: extractTags(text) };
 }
 
@@ -122,21 +126,65 @@ export function sortedSections(sections) {
 }
 
 /**
+ * Sections as an outline, depth-first: each topic followed by its subtopics.
+ * Adds `depth` (0 = topic), `parentId` (effective; a missing or looping parent makes
+ * it a topic) and `number` ("02", "02.1", "02.1.3").
+ */
+export function orderedSections(sections) {
+  const list = sortedSections(sections);
+  const parents = parentMap(new Map(list.map((s) => [s.id, s])));
+  const kids = new Map();
+  const roots = [];
+  for (const s of list) {
+    const p = parents.get(s.id);
+    if (p) {
+      if (!kids.has(p)) kids.set(p, []);
+      kids.get(p).push(s);
+    } else roots.push(s);
+  }
+  const out = [];
+  const walk = (s, depth, number) => {
+    out.push({ ...s, parentId: parents.get(s.id) || null, depth, number });
+    (kids.get(s.id) || []).forEach((k, i) => walk(k, depth + 1, `${number}.${i + 1}`));
+  };
+  roots.forEach((s, i) => walk(s, 0, String(i + 1).padStart(2, "0")));
+  return out;
+}
+
+/**
  * The newest section; notes go here unless the writer pins another one. Sections
  * created together (template, agenda) share a timestamp, so the first of that batch wins.
  * Sections spawned from hashtags don't count: they collect tagged notes, not the flow.
  */
 export function latestSection(sections) {
   let best = null;
-  for (const s of sortedSections(sections)) {
+  for (const s of orderedSections(sections)) {
     if (s.tag) continue;
     if (!best || (s.createdAt ?? 0) > (best.createdAt ?? 0)) best = s;
   }
   return best;
 }
 
-export const nextOrder = (sections) =>
-  Object.values(sections || {}).reduce((m, s) => Math.max(m, (s.order ?? 0) + 1), 0);
+/** Next `order` among the children of `parentId` (null = topics). */
+export const nextOrder = (sections, parentId = null) =>
+  orderedSections(sections)
+    .filter((s) => s.parentId === parentId)
+    .reduce((m, s) => Math.max(m, (s.order ?? 0) + 1), 0);
+
+/**
+ * Where a new heading of `level` (0 topic, 1 subtopic, 2 sub-subtopic) goes, given the
+ * section the writer is in: under that section's ancestor one level up. Returns the
+ * parent id (null = new topic).
+ */
+export function headingParent(sections, level, currentId) {
+  if (level <= 0 || !currentId) return null;
+  const ordered = orderedSections(sections);
+  const byId = new Map(ordered.map((s) => [s.id, s]));
+  let cur = byId.get(currentId);
+  if (!cur) return null;
+  while (cur.depth > level - 1 && cur.parentId) cur = byId.get(cur.parentId);
+  return cur.id;
+}
 
 function sectionTagIndex(sections) {
   const index = new Map();
@@ -217,33 +265,79 @@ function findConflicts(notes) {
   return out;
 }
 
+/** Deepest sub-point level the composer allows (0 = top-level point). */
+export const MAX_DEPTH = 4;
+
 /**
- * Weave a doc snapshot into sections of collapsed bullets.
- * Returns { sections, unsorted, stats, groupOfNote }.
+ * Effective parent of each note: its `parentId` when that note exists and following
+ * parents upward never loops. Notes whose parent is gone become top-level.
+ */
+export function parentMap(notesById) {
+  const out = new Map();
+  for (const [id, n] of notesById) {
+    if (!n.parentId || !notesById.has(n.parentId)) continue;
+    const seen = new Set([id]);
+    let cur = n;
+    let loops = false;
+    while (cur.parentId && notesById.has(cur.parentId)) {
+      if (seen.has(cur.parentId)) {
+        loops = true;
+        break;
+      }
+      seen.add(cur.parentId);
+      cur = notesById.get(cur.parentId);
+    }
+    if (!loops) out.set(id, n.parentId);
+  }
+  return out;
+}
+
+/**
+ * Weave a doc snapshot into sections of collapsed bullets. Sub-points (notes with a
+ * parent) nest under their parent's point and collapse among their siblings.
+ * Returns { sections, unsorted, stats, groupOfNote, sectionOfNote }.
  */
 export function weave(doc) {
-  const sections = sortedSections(doc.sections);
+  const sections = orderedSections(doc.sections);
   const tagIndex = sectionTagIndex(doc.sections);
   const merges = doc.merges || {};
   const notes = Object.entries(doc.notes || {})
     .map(([id, n]) => ({ id, ...n, tokens: tokenize(n.text || "") }))
     .sort((a, b) => (a.createdAt ?? 0) - (b.createdAt ?? 0));
-
-  const placed = new Map(notes.map((n) => [n.id, placeNote(n, doc.sections, tagIndex)]));
-  // A hand-merged note follows its target into the target's section.
+  const byId = new Map(notes.map((n) => [n.id, n]));
+  const parents = parentMap(byId);
+  const childrenOf = new Map();
   for (const n of notes) {
+    const p = parents.get(n.id);
+    if (!p) continue;
+    if (!childrenOf.has(p)) childrenOf.set(p, []);
+    childrenOf.get(p).push(n);
+  }
+  const roots = notes.filter((n) => !parents.has(n.id));
+
+  const placed = new Map(roots.map((n) => [n.id, placeNote(n, doc.sections, tagIndex)]));
+  // A hand-merged note follows its target into the target's section.
+  for (const n of roots) {
     const target = merges[n.id];
     if (target && placed.has(target)) placed.set(n.id, placed.get(target));
   }
+  // Sub-points live wherever their top-level ancestor lives.
+  const sectionOfNote = new Map();
+  const rootOf = (n) => {
+    while (parents.has(n.id)) n = byId.get(parents.get(n.id));
+    return n;
+  };
+  for (const n of notes) sectionOfNote.set(n.id, placed.get(rootOf(n).id) ?? null);
 
   const contributors = new Set(notes.map((n) => n.author));
   const bySection = new Map([[null, []], ...sections.map((s) => [s.id, []])]);
-  for (const n of notes) bySection.get(placed.get(n.id)).push(n);
+  for (const n of roots) bySection.get(placed.get(n.id)).push(n);
 
   const groupOfNote = new Map();
   let duplicateCount = 0;
+  let pointCount = 0;
 
-  const buildItems = (list) => {
+  const buildItems = (list, depth) => {
     const items = groupDuplicates(list, merges).map((g) => {
       const rep = g.reduce((best, n) =>
         n.tokens.words.size + n.tokens.nums.size > best.tokens.words.size + best.tokens.nums.size ? n : best,
@@ -254,23 +348,28 @@ export function weave(doc) {
         rep,
         notes: g,
         authors,
+        depth,
         createdAt: g[0].createdAt ?? 0,
-        solo: authors.length === 1 && contributors.size >= 2,
+        solo: depth === 0 && authors.length === 1 && contributors.size >= 2,
         manual: g.some((n) => merges[n.id]),
         conflicts: [],
         clashNums: new Set(),
+        children: [],
       };
     });
     for (const item of items) {
       for (const n of item.notes) groupOfNote.set(n.id, item);
       duplicateCount += item.notes.length - 1;
+      pointCount++;
+      const kids = item.notes.flatMap((n) => childrenOf.get(n.id) || []);
+      if (kids.length) item.children = buildItems(kids, depth + 1);
     }
     return items.sort((a, b) => a.createdAt - b.createdAt);
   };
 
   const woven = sections.map((s) => {
-    const list = bySection.get(s.id);
-    const items = buildItems(list);
+    const items = buildItems(bySection.get(s.id), 0);
+    const list = notes.filter((n) => sectionOfNote.get(n.id) === s.id);
     const times = list.map((n) => n.createdAt ?? 0);
     return {
       ...s,
@@ -283,13 +382,16 @@ export function weave(doc) {
     };
   });
 
-  // Gap heatmap: sections well below the average number of distinct points glow.
-  const totalPoints = woven.reduce((sum, s) => sum + s.items.length, 0);
-  if (woven.length >= 2 && totalPoints >= 4) {
-    const mean = totalPoints / woven.length;
-    for (const s of woven) s.heat = Math.max(0, Math.min(1, 1 - s.items.length / (0.6 * mean)));
+  // Gap heatmap: leaf sections well below the average number of distinct top-level
+  // points glow. A section with subtopics is judged by its subtopics instead.
+  const parentIds = new Set(woven.map((s) => s.parentId).filter(Boolean));
+  const leaves = woven.filter((s) => !parentIds.has(s.id));
+  const leafPoints = leaves.reduce((sum, s) => sum + s.items.length, 0);
+  if (leaves.length >= 2 && leafPoints >= 4) {
+    const mean = leafPoints / leaves.length;
+    for (const s of leaves) s.heat = Math.max(0, Math.min(1, 1 - s.items.length / (0.6 * mean)));
   }
-  const unsorted = buildItems(bySection.get(null));
+  const unsorted = buildItems(bySection.get(null), 0);
 
   const conflicts = findConflicts(notes);
   for (const c of conflicts) {
@@ -305,14 +407,71 @@ export function weave(doc) {
     sections: woven,
     unsorted,
     groupOfNote,
+    sectionOfNote,
     stats: {
       notes: notes.length,
-      points: totalPoints + unsorted.length,
+      points: pointCount,
       contributors: contributors.size,
       conflicts: conflicts.length,
       duplicates: duplicateCount,
     },
   };
+}
+
+/**
+ * One person's notes in outline order: each top-level note followed by its own
+ * sub-points (depth-first, oldest first). Notes whose parent belongs to someone else
+ * start a new branch and keep `foreignParent` so the UI can say what they hang under.
+ */
+export function streamOutline(mine, allNotesById) {
+  const ids = new Set(mine.map((n) => n.id));
+  const parents = parentMap(allNotesById);
+  const kids = new Map();
+  const roots = [];
+  for (const n of mine) {
+    const p = parents.get(n.id);
+    if (p && ids.has(p)) {
+      if (!kids.has(p)) kids.set(p, []);
+      kids.get(p).push(n);
+    } else roots.push(n);
+  }
+  const byTime = (a, b) => (a.createdAt ?? 0) - (b.createdAt ?? 0);
+  const out = [];
+  const walk = (n, depth) => {
+    const p = parents.get(n.id);
+    out.push({ note: n, depth, foreignParent: depth === 0 && p ? p : null });
+    for (const k of (kids.get(n.id) || []).sort(byTime)) walk(k, depth + 1);
+  };
+  for (const r of roots.sort(byTime)) walk(r, 0);
+  return out;
+}
+
+/**
+ * Split pasted text into an outline: [{kind: "note"|"section", text, depth}].
+ * Indentation (tabs or 2 spaces) and list markers set depth; "# " lines are topics.
+ */
+export function parseOutline(raw) {
+  const out = [];
+  const indents = [];
+  for (const line of raw.replace(/\r/g, "").split("\n")) {
+    if (!line.trim()) continue;
+    const lead = /^[\t ]*/.exec(line)[0];
+    const width = [...lead].reduce((w, c) => w + (c === "\t" ? 4 : 1), 0);
+    let body = line.slice(lead.length);
+    const heading = /^(#{1,6})\s*([^#\s].*)$/.exec(body);
+    if (heading) {
+      out.push({ kind: "section", text: heading[2].trim(), level: Math.min(heading[1].length - 1, 2) });
+      indents.length = 0;
+      continue;
+    }
+    body = body.replace(/^(?:[-*+•–◦▪]|\d+[.)]|[a-z][.)])\s+/i, "").trim();
+    if (!body) continue;
+    while (indents.length && width <= indents[indents.length - 1]) indents.pop();
+    const depth = Math.min(indents.length, MAX_DEPTH);
+    indents.push(width);
+    out.push({ kind: "note", text: body, depth });
+  }
+  return out;
 }
 
 // ───────────── Export ─────────────
@@ -331,23 +490,25 @@ export function toMarkdown(doc, woven, nameOf) {
     const credits = [...counts].sort((a, b) => b[1] - a[1]).map(([uid, c]) => `${nameOf(uid)} (${c})`);
     out.push(`**Contributors:** ${credits.join(", ")}`, "");
   }
-  const bullet = (item) => {
+  const bullet = (item, depth = 0) => {
+    const pad = "  ".repeat(depth);
     const names = item.authors.map(nameOf).join(", ");
     const marks = [];
     if (item.authors.length > 1) marks.push(`×${item.authors.length}`);
     if (item.solo) marks.push("solo");
-    let line = `- ${item.rep.text.replace(/\n+/g, " ")} — _${names}_${marks.length ? ` (${marks.join(", ")})` : ""}`;
+    let line = `${pad}- ${item.rep.text.replace(/\n+/g, " ")} — _${names}_${marks.length ? ` (${marks.join(", ")})` : ""}`;
     if (item.conflicts.length) {
       const others = item.conflicts.map((c) => `"${findText(doc, c.other)}"`).join("; ");
-      line += `\n  - ⚠ Conflicts with ${others}`;
+      line += `\n${pad}  - ⚠ Conflicts with ${others}`;
     }
+    for (const child of item.children) line += "\n" + bullet(child, depth + 1);
     return line;
   };
   for (const s of woven.sections) {
     const when = s.firstAt ? ` · ${fmtTime(s.firstAt)}` : "";
-    out.push(`## ${s.title}`, "");
+    out.push(`${"#".repeat(Math.min(2 + (s.depth || 0), 6))} ${s.title}`, "");
     if (s.firstAt) out.push(`<sub>${s.noteCount} notes${when}</sub>`, "");
-    if (!s.items.length) out.push("_No notes._");
+    if (!s.items.length && !woven.sections.some((x) => x.parentId === s.id)) out.push("_No notes._");
     for (const item of s.items) out.push(bullet(item));
     out.push("");
   }

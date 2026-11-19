@@ -87,6 +87,7 @@ export async function addSection(docId, user, title, order, extra = {}) {
     createdAt: db.TIMESTAMP,
     order,
     ...(extra.tag ? { tag: extra.tag } : {}),
+    ...(extra.parentId ? { parentId: extra.parentId } : {}),
   });
   return id;
 }
@@ -120,13 +121,15 @@ export const claimSection = (docId, sid, user) =>
 export const reorderSections = (docId, ids) =>
   db.update(Object.fromEntries(ids.map((id, i) => [`docs/${docId}/sections/${id}/order`, i])));
 
-export async function addNote(docId, user, { text, sectionId, tags }) {
+/** `parentId` makes the note a sub-point of another note (anyone's); `sectionId` should be that note's section. */
+export async function addNote(docId, user, { text, sectionId, tags, parentId = null }) {
   const id = db.key();
   await db.set(`docs/${docId}/notes/${id}`, {
     author: user.uid,
     authorName: user.name,
     text,
     sectionId: sectionId || null,
+    parentId: parentId || null,
     tags: tags.length ? tags : null,
     createdAt: db.TIMESTAMP,
   });
@@ -140,8 +143,19 @@ export const editNote = (docId, noteId, text, tags) =>
     [`docs/${docId}/notes/${noteId}/editedAt`]: db.TIMESTAMP,
   });
 
+/** Moving a note to a section also lifts it out from under any parent. */
 export const moveNote = (docId, noteId, sectionId) =>
-  db.set(`docs/${docId}/notes/${noteId}/sectionId`, sectionId || null);
+  db.update({
+    [`docs/${docId}/notes/${noteId}/sectionId`]: sectionId || null,
+    [`docs/${docId}/notes/${noteId}/parentId`]: null,
+  });
+
+/** Nest a note under `parentId` (null = make it a top-level point again). */
+export const setNoteParent = (docId, noteId, parentId, sectionId) =>
+  db.update({
+    [`docs/${docId}/notes/${noteId}/parentId`]: parentId || null,
+    [`docs/${docId}/notes/${noteId}/sectionId`]: sectionId || null,
+  });
 
 export const deleteNote = (docId, noteId) =>
   db.update({ [`docs/${docId}/notes/${noteId}`]: null, [`docs/${docId}/merges/${noteId}`]: null });

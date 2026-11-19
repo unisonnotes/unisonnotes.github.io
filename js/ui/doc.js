@@ -10,6 +10,7 @@ import { ShareModal } from "./share.js";
 import { Spine } from "./spine.js";
 import { WovenPage } from "./woven.js";
 import { StreamPanel, StreamsView } from "./stream.js";
+import { Tour, TOUR_KEY } from "./tour.js";
 import { weave, tagsNeedingSections, tagTitle, nextOrder, latestSection, toMarkdown, agendaToSections } from "../weave.js";
 import * as store from "../store.js";
 
@@ -62,24 +63,36 @@ function useToggle(key, initial) {
   return [v, set];
 }
 
-function HelpModal({ open, onClose }) {
+function HelpModal({ open, onClose, onTour }) {
   const rows = [
     ["Your stream", "Everyone types in their own column. No cursor collisions, and you only ever edit your own notes."],
-    ["The spine", "One shared outline. Type “# Topic” to add a section for everyone. New notes go to the latest section unless you pin another."],
-    ["Hashtags", "When two or more people use the same #tag, it becomes a section and those notes move into it."],
+    ["Bullets", "Enter sends a bullet. Tab nests the next one under it, Shift+Tab steps back out. Hover a point on the page and press + to add a sub-point under anyone's note. Pasting an indented list keeps its structure."],
+    ["Topics", "Start a message with #, like “#Mitochondria”, to add a topic for everyone. ##Cristae makes a subtopic inside the topic you're writing in, ### goes one deeper. New notes go to the newest topic."],
+    ["Hashtags", "A #tag in the middle of a note groups it. When two or more people use the same tag, it becomes a topic and those notes move into it."],
     ["Duplicates", "Notes that say the same thing collapse into one point with a ×N badge. Points only one person wrote get a “solo” marker."],
     ["Conflicts", "Similar notes with different numbers or dates are highlighted so someone can check."],
-    ["Gaps", "Sections with few notes glow. Claim one to tell the group you're covering it."],
+    ["Gaps", "Topics with few notes glow. Claim one to tell the group you're covering it."],
     ["Paraphrases", "Word matching can't catch every rewording. Use “Merge into…” on your note, then click the point it repeats."],
   ];
   const keys = [
-    [html`<${Kbd}>↵<//>`, "Send note"],
-    [html`<${Kbd}>⇧<//> <${Kbd}>↵<//>`, "New line"],
-    [html`<${Kbd}>Tab<//>`, "Complete #tag"],
+    [html`<${Kbd}>↵<//>`, "Send bullet"],
+    [html`<${Kbd}>⇧<//> <${Kbd}>↵<//>`, "New line in a bullet"],
+    [html`<${Kbd}>Tab<//>`, "Indent / complete #tag"],
+    [html`<${Kbd}>⇧<//> <${Kbd}>Tab<//>`, "Outdent"],
+    [html`<${Kbd}>#<//> <${Kbd}>##<//>`, "Topic / subtopic"],
+    [html`<${Kbd}>Ctrl<//> <${Kbd}>B<//> <${Kbd}>I<//>`, "Bold / italic"],
     [html`<${Kbd}>/<//>`, "Jump to composer"],
     [html`<${Kbd}>Esc<//>`, "Cancel merge or edit"],
   ];
-  return html`<${Modal} open=${open} onClose=${onClose} title="How Unison works" subtitle="Write alone. Read together." icon="circle-help" width=${620}>
+  return html`<${Modal}
+    open=${open}
+    onClose=${onClose}
+    title="How Unison works"
+    subtitle="Write alone. Read together."
+    icon="circle-help"
+    width=${640}
+    footer=${html`<button class="btn btn--primary" onClick=${onTour}><${Icon} name="sparkle" /> Take the tour</button>`}
+  >
     <div class="help-grid">
       ${rows.map(([t, d], i) => html`<div class="help-row" key=${i}><span class="kicker">${t}</span><p>${d}</p></div>`)}
     </div>
@@ -95,11 +108,11 @@ function AgendaModal({ open, onClose, onAdd }) {
   return html`<${Modal}
     open=${open}
     onClose=${onClose}
-    title="Add sections from an agenda"
-    subtitle="Each line becomes a section at the end of the spine."
+    title="Add topics from an agenda"
+    subtitle="Each line becomes a topic at the end of the spine."
     icon="clipboard-list"
     footer=${html`<button class="btn btn--ghost" onClick=${onClose}>Cancel</button>
-      <button class="btn btn--primary" disabled=${!list.length} onClick=${() => onAdd(list)}>Add ${list.length || ""} sections</button>`}
+      <button class="btn btn--primary" disabled=${!list.length} onClick=${() => onAdd(list)}>Add ${list.length || ""} topics</button>`}
   >
     <textarea class="field field--area mono" rows="7" autofocus placeholder=${"1. Recap\n2. New material\n3. Practice"} value=${text} onInput=${(e) => setText(e.target.value)} />
   <//>`;
@@ -152,6 +165,7 @@ function DocView({ user, doc, role, backend }) {
   const [mergeFrom, setMergeFrom] = useState(null);
   const [activeSection, setActiveSection] = useState(null);
   const [modal, setModal] = useState(null); // share | theme | help | agenda
+  const [tour, setTour] = useState(() => canEdit && !localStorage.getItem(TOUR_KEY));
   const composerRef = useRef(null);
   const searchRef = useRef(null);
 
@@ -272,18 +286,19 @@ function DocView({ user, doc, role, backend }) {
     }, 30);
   };
 
-  const addSectionPrompt = async () => {
-    const title = await ask({ title: "New section", body: "Adds a section to the shared spine for everyone.", input: { placeholder: "Section title" }, confirm: "Add section", icon: "hash" });
-    if (!title) return;
-    await store.addSection(docId, user, title, nextOrder(doc.sections));
-    setTarget("auto");
-    toast(html`Added <b>${title}</b> to the spine`, { icon: "hash" });
+  // The composer lives in the side panel; open it first if it's closed.
+  const composerApi = useRef(null);
+  const withComposer = (fn) => {
+    setShowPanel(true);
+    const run = (tries) => (composerApi.current ? fn(composerApi.current) : tries && setTimeout(() => run(tries - 1), 40));
+    run(10);
   };
+  const startTopic = (level) => withComposer((api) => api.startTopic(level));
 
   const addAgenda = async (titles) => {
     await store.addSections(docId, user, titles, nextOrder(doc.sections));
     setModal(null);
-    toast(`Added ${titles.length} sections`, { icon: "list-tree" });
+    toast(`Added ${titles.length} topics`, { icon: "list-tree" });
   };
 
   const exportMarkdown = () => {
@@ -344,11 +359,14 @@ function DocView({ user, doc, role, backend }) {
     setActiveSection,
     scrollToSection,
     composerRef,
+    composerApi,
     focusComposer: (sid) => {
       if (sid !== undefined) setTarget(sid);
       setShowPanel(true);
       setTimeout(() => composerRef.current?.focus(), 40);
     },
+    nestUnder: (noteId) => withComposer((api) => api.nestUnder(noteId)),
+    startTopic,
   };
 
   const stats = woven.stats;
@@ -402,13 +420,17 @@ function DocView({ user, doc, role, backend }) {
     {
       label: "Insert",
       items: [
-        { label: "Section…", icon: "hash", disabled: !canEdit, onSelect: addSectionPrompt },
-        { label: "Sections from agenda…", icon: "clipboard-list", disabled: !canEdit, onSelect: () => setModal("agenda") },
+        { label: "Topic", hint: "or type #Topic", icon: "hash", disabled: !canEdit, onSelect: () => startTopic(0) },
+        { label: "Subtopic", hint: "or type ##Subtopic", icon: "corner-down-left", disabled: !canEdit || !resolvedTarget, onSelect: () => startTopic(1) },
+        { label: "Topics from agenda…", icon: "clipboard-list", disabled: !canEdit, onSelect: () => setModal("agenda") },
       ],
     },
     {
       label: "Help",
-      items: [{ label: "How Unison works", icon: "circle-help", onSelect: () => setModal("help") }],
+      items: [
+        { label: "Take the tour", icon: "sparkle", onSelect: () => setTour(true) },
+        { label: "How Unison works", icon: "circle-help", onSelect: () => setModal("help") },
+      ],
     },
   ];
 
@@ -435,7 +457,7 @@ function DocView({ user, doc, role, backend }) {
       <div class="doc-header-right">
         <${AvatarStack} people=${onlinePeople} max=${4} size=${30} />
         <${ModeToggle} />
-        <button class="btn btn--share" onClick=${() => setModal("share")}>
+        <button class="btn btn--share" onClick=${() => setModal("share")} data-tour="share">
           <${Icon} name=${Object.keys(doc.members || {}).length > 1 ? "users" : "lock"} size=${15} /> Share
         </button>
         <${AccountMenu} user=${user} backend=${backend} onTheme=${() => setModal("theme")} />
@@ -446,7 +468,7 @@ function DocView({ user, doc, role, backend }) {
       <div class="toolbar-group">
         <button class=${"tool-btn" + (showSpine ? " is-on" : "")} onClick=${() => setShowSpine((v) => !v)} title="Spine outline" aria-label="Toggle spine"><${Icon} name="list-tree" /></button>
         <span class="tool-sep" />
-        <div class="segmented segmented--tool" role="tablist">
+        <div class="segmented segmented--tool" role="tablist" data-tour="views">
           <button class=${view === "woven" ? "is-on" : ""} onClick=${() => setView("woven")}><${Icon} name="file-text" size=${14} /> Woven</button>
           <button class=${view === "streams" ? "is-on" : ""} onClick=${() => setView("streams")}><${Icon} name="columns-3" size=${14} /> Streams</button>
         </div>
@@ -457,7 +479,7 @@ function DocView({ user, doc, role, backend }) {
         <button class=${"stat stat--btn stat--warn mono" + (stats.conflicts ? "" : " is-zero")} onClick=${() => jumpTo("conflict")} disabled=${!stats.conflicts} title="Jump to next conflict">
           <${Icon} name="triangle-alert" size=${13} /> <b>${stats.conflicts}</b> conflict${stats.conflicts === 1 ? "" : "s"}
         </button>
-        <button class=${"stat stat--btn stat--heat mono" + (gaps ? "" : " is-zero")} onClick=${() => jumpTo("gap")} disabled=${!gaps} title="Jump to next thin section">
+        <button class=${"stat stat--btn stat--heat mono" + (gaps ? "" : " is-zero")} onClick=${() => jumpTo("gap")} disabled=${!gaps} title="Jump to next thin topic">
           <${Icon} name="flame" size=${13} /> <b>${gaps}</b> gap${gaps === 1 ? "" : "s"}
         </button>
       </div>
@@ -484,7 +506,7 @@ function DocView({ user, doc, role, backend }) {
     </div>`}
 
     <div class="doc-body">
-      ${showSpine && html`<${Spine} ctx=${ctx} onAddSection=${addSectionPrompt} onAgenda=${() => setModal("agenda")} />`}
+      ${showSpine && html`<${Spine} ctx=${ctx} onAddSection=${() => startTopic(0)} onAgenda=${() => setModal("agenda")} />`}
       <main class="canvas">
         ${view === "woven" ? html`<${WovenPage} ctx=${ctx} />` : html`<${StreamsView} ctx=${ctx} />`}
       </main>
@@ -493,7 +515,16 @@ function DocView({ user, doc, role, backend }) {
 
     <${ShareModal} open=${modal === "share"} onClose=${() => setModal(null)} doc=${doc} user=${user} role=${role} />
     <${ThemePicker} open=${modal === "theme"} onClose=${() => setModal(null)} />
-    <${HelpModal} open=${modal === "help"} onClose=${() => setModal(null)} />
+    <${HelpModal} open=${modal === "help"} onClose=${() => setModal(null)} onTour=${() => (setModal(null), setTour(true))} />
     <${AgendaModal} open=${modal === "agenda"} onClose=${() => setModal(null)} onAdd=${addAgenda} />
+    ${tour &&
+    html`<${Tour}
+      ctx=${ctx}
+      stage=${{ setShowPanel, setShowSpine, setView }}
+      onClose=${() => {
+        localStorage.setItem(TOUR_KEY, "1");
+        setTour(false);
+      }}
+    />`}
   </div>`;
 }

@@ -8,7 +8,9 @@ Live: https://unisonnotes.github.io
 ## How it works
 
 - **Streams**: each person types in their own column. People only edit their own notes, so there is nothing to merge.
-- **Spine**: the one shared outline. `# Topic` in the composer adds a section for everyone; new notes go to the latest section unless you pin another.
+- **Spine**: the one shared outline. `#Topic` in the composer adds a topic for everyone, `##Subtopic` nests one inside the topic you're in (`###` goes one deeper). New notes go to the latest topic unless you pin another.
+- **Bullets**: Enter sends a bullet, Tab nests the next one under it, Shift+Tab steps out. `+` on any point adds a sub-point under it. Pasting an indented list (or Markdown headings) keeps its structure. `**bold**`, `*italic*`, `` `code` `` and links render.
+- **Tour**: an interactive walkthrough opens the first time someone opens a doc; Help → Take the tour replays it.
 - **Hashtags**: a `#tag` used by 2+ people becomes a section and pulls those notes in.
 - **Weaving** (in each browser, `js/weave.js`): duplicates collapse into one point with a ×N badge, points only one person wrote get a *solo* marker, similar notes with different numbers or dates are flagged, thin sections glow (gap heatmap) and can be claimed. Paraphrases the word matcher misses can be merged by hand.
 - **Export**: Markdown with credits, or Print → PDF of the woven page.
@@ -20,7 +22,7 @@ npm run serve        # http://localhost:5173
 npm test             # weave logic tests
 ```
 
-With no Firebase config (`js/config.js` has an empty `apiKey`) the app runs in **Local mode**: data lives in this browser's IndexedDB and syncs across tabs. Open a second tab, sign in with a different email, and share docs between them to try everything.
+With no Firebase config (`js/config.js` has an empty `apiKey`), or with `?local` in the URL, the app runs in **Local mode**: data lives in this browser's IndexedDB and syncs across tabs. Open a second tab, sign in with a different email, and share docs between them to try everything.
 
 ## Connect Firebase
 
@@ -37,8 +39,8 @@ users/{uid}                 name, email, photo, docs/{docId}: role, lastOpened
 docs/{docId}
   meta                      title, owner, ownerName, createdAt
   members/{uid}             role (owner | editor | viewer), name, email, photo
-  sections/{id}             title, createdBy, createdAt, order, tag?, claim?
-  notes/{id}                author, authorName, text, sectionId, tags, createdAt, editedAt?
+  sections/{id}             title, createdBy, createdAt, order, parentId? (subtopic), tag?, claim?
+  notes/{id}                author, authorName, text, sectionId, parentId? (sub-point), tags, createdAt, editedAt?
   merges/{noteId}           targetNoteId (hand-merged paraphrases)
   presence/{uid}            name, section, at
   invites/{emailKey}        email, role (pending invites, shown in the share dialog)

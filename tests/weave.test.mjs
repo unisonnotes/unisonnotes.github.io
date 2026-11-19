@@ -7,6 +7,8 @@ import {
   weave,
   latestSection,
   toMarkdown,
+  parseOutline,
+  streamOutline,
 } from "../js/weave.js";
 
 const doc = (sections, notes, merges = {}) => ({ meta: { title: "T" }, sections, notes, merges });
@@ -18,12 +20,41 @@ const note = (author, text, sectionId, createdAt, tags) => ({
   tags: tags || parseInput(text).tags,
 });
 
-test("parseInput: '# Topic' is a section, '#tag' inside text is a tag", () => {
-  assert.deepEqual(parseInput("# Photosynthesis"), { kind: "section", title: "Photosynthesis" });
+test("parseInput: a leading # makes a topic (## subtopic), #tags elsewhere are tags", () => {
+  assert.deepEqual(parseInput("# Photosynthesis"), { kind: "section", title: "Photosynthesis", level: 0 });
+  assert.deepEqual(parseInput("#Mitochondria"), { kind: "section", title: "Mitochondria", level: 0 });
+  assert.deepEqual(parseInput("##cristae"), { kind: "section", title: "cristae", level: 1 });
+  assert.deepEqual(parseInput("### Folds"), { kind: "section", title: "Folds", level: 2 });
   const n = parseInput("Light reactions make ATP #Photo-synthesis #atp");
   assert.equal(n.kind, "note");
   assert.deepEqual(n.tags, ["photo-synthesis", "atp"]);
-  assert.equal(parseInput("#notaheading").kind, "note");
+  assert.equal(parseInput("#").kind, "note");
+  assert.equal(parseInput("#### too deep").kind, "note");
+});
+
+test("subtopics nest under the topic you're in", () => {
+  const sections = {
+    a: { title: "Cells", order: 0, createdAt: 1 },
+    b: { title: "Mito", order: 1, createdAt: 2 },
+    b1: { title: "Cristae", order: 0, createdAt: 3, parentId: "b" },
+    b1a: { title: "Folds", order: 0, createdAt: 4, parentId: "b1" },
+    gone: { title: "Orphan", order: 2, createdAt: 5, parentId: "deleted" },
+  };
+  const ordered = orderedSections(sections);
+  assert.deepEqual(ordered.map((s) => [s.id, s.depth, s.number]), [
+    ["a", 0, "01"],
+    ["b", 0, "02"],
+    ["b1", 1, "02.1"],
+    ["b1a", 2, "02.1.1"],
+    ["gone", 0, "03"],
+  ]);
+  assert.equal(headingParent(sections, 1, "b"), "b", "## inside a topic nests under it");
+  assert.equal(headingParent(sections, 1, "b1a"), "b", "## inside a sub-subtopic nests under the topic");
+  assert.equal(headingParent(sections, 2, "b1"), "b1");
+  assert.equal(headingParent(sections, 0, "b1"), null);
+  assert.equal(nextOrder(sections, "b"), 1);
+  assert.equal(nextOrder(sections), 3);
+  assert.equal(latestSection(sections).id, "gone");
 });
 
 test("agenda paste strips bullets and numbering", () => {
@@ -150,6 +181,71 @@ test("word families match and conflicts are found across sections", () => {
   assert.deepEqual(w.sections[0].items[0].authors, ["u1", "u2"]);
   assert.equal(w.stats.conflicts, 1);
   assert.ok(w.sections[1].items[0].clashNums.has("3"));
+});
+
+test("sub-points nest under their point, follow its section and collapse among siblings", () => {
+  const notes = {
+    p1: note("u1", "Photosynthesis has two stages", "s1", 10),
+    p2: note("u2", "photosynthesis happens in two stages", "s1", 11),
+    c1: { ...note("u1", "Light reactions happen in the thylakoid", "s1", 12), parentId: "p1" },
+    c2: { ...note("u2", "light reactions occur in the thylakoids", "gone", 13), parentId: "p2" },
+    c3: { ...note("u2", "Calvin cycle in the stroma", "s1", 14), parentId: "p2" },
+    g1: { ...note("u1", "uses ATP from light reactions", "s1", 15), parentId: "c1" },
+    orphan: { ...note("u1", "parent was deleted", "s1", 16), parentId: "missing" },
+    loopA: { ...note("u1", "loop a", "s1", 17), parentId: "loopB" },
+    loopB: { ...note("u1", "loop b", "s1", 18), parentId: "loopA" },
+  };
+  const w = weave(doc({ s1: { title: "Plants", order: 0, createdAt: 1 } }, notes));
+  const items = w.sections[0].items;
+  const top = items[0];
+  assert.deepEqual(top.authors, ["u1", "u2"], "the two parents merge");
+  assert.equal(top.children.length, 2, "duplicate sub-points under the merged point collapse");
+  assert.deepEqual(top.children[0].authors, ["u1", "u2"]);
+  assert.equal(top.children[0].children[0].rep.id, "g1", "grandchildren keep nesting");
+  assert.equal(w.sectionOfNote.get("c2"), "s1", "sub-points follow their ancestor's section");
+  assert.ok(items.some((i) => i.id === "orphan"), "orphans become top-level");
+  assert.ok(items.some((i) => i.id === "loopA") && items.some((i) => i.id === "loopB"), "cycles don't vanish");
+  assert.equal(top.children[0].solo, false);
+  const md = toMarkdown(doc({ s1: { title: "Plants", order: 0, createdAt: 1 } }, notes), w, (u) => u);
+  assert.match(md, /\n  - Light reactions/);
+  assert.match(md, /\n    - uses ATP/);
+});
+
+test("pasted outlines keep their structure", () => {
+  const out = parseOutline("# Cells\n- Mitochondria\n  - makes ATP\n    - via ETC\n  - has DNA\n- Ribosomes\n\n1. Numbered\n\tTabbed child");
+  assert.deepEqual(
+    out.map((o) => [o.kind, o.text, o.kind === "section" ? o.level : o.depth]),
+    [
+      ["section", "Cells", 0],
+      ["note", "Mitochondria", 0],
+      ["note", "makes ATP", 1],
+      ["note", "via ETC", 2],
+      ["note", "has DNA", 1],
+      ["note", "Ribosomes", 0],
+      ["note", "Numbered", 0],
+      ["note", "Tabbed child", 1],
+    ],
+  );
+});
+
+test("a stream lists sub-points right after their parent", () => {
+  const all = new Map(
+    Object.entries({
+      a: { author: "me", createdAt: 1 },
+      b: { author: "me", createdAt: 2 },
+      a1: { author: "me", createdAt: 3, parentId: "a" },
+      x: { author: "them", createdAt: 0 },
+      x1: { author: "me", createdAt: 4, parentId: "x" },
+    }),
+  );
+  const mine = ["a", "b", "a1", "x1"].map((id) => ({ id, ...all.get(id) }));
+  const out = streamOutline(mine, all);
+  assert.deepEqual(out.map((o) => [o.note.id, o.depth, o.foreignParent]), [
+    ["a", 0, null],
+    ["a1", 1, null],
+    ["b", 0, null],
+    ["x1", 0, "x"],
+  ]);
 });
 
 test("markdown export credits writers and marks conflicts", () => {
