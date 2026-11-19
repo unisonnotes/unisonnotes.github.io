@@ -640,7 +640,6 @@ code {
   border-radius: 12px;
   border: 1px solid var(--border-strong);
   background: var(--surface);
-  overflow: hidden;
   cursor: pointer;
   animation: fade-up .45s var(--ease-out) both;
   animation-delay: calc(var(--i) * var(--stagger));
@@ -649,7 +648,7 @@ code {
 .doc-card:hover { border-color: color-mix(in oklab, var(--accent) 55%, transparent); transform: translateY(-2px); box-shadow: 0 18px 36px -22px color-mix(in oklab, var(--accent) 80%, transparent); }
 .doc-card--ghost { height: 268px; cursor: default; background: linear-gradient(100deg, var(--surface) 30%, var(--surface-2) 50%, var(--surface) 70%) 0 0 / 300% 100%; animation: fade-up .45s var(--ease-out) both, shimmer 1.6s linear infinite; }
 @keyframes shimmer { to { background-position: -150% 0; } }
-.thumb { height: 190px; padding: 16px 18px 0; background: var(--bg-2); border-bottom: 1px solid var(--border); overflow: hidden; }
+.thumb { height: 190px; padding: 16px 18px 0; background: var(--bg-2); border-bottom: 1px solid var(--border); border-radius: 11px 11px 0 0; overflow: hidden; }
 .thumb-page { height: 100%; padding: 14px 14px 0; border-radius: 6px 6px 0 0; background: var(--page); box-shadow: 0 0 0 1px var(--page-edge), 0 8px 18px -10px rgba(0, 0, 0, .25); display: flex; flex-direction: column; gap: 6px; }
 .th-title { font-size: 10px; font-weight: 600; letter-spacing: -.01em; margin-bottom: 3px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .th-h { display: block; height: 5px; border-radius: 3px; background: var(--text-3); opacity: .7; margin-top: 4px; }
@@ -661,7 +660,13 @@ code {
 .doc-card-meta .sep { opacity: .5; }
 .doc-card-foot .menu-wrap { position: absolute; right: 6px; top: 50%; transform: translateY(-50%); }
 
-.doc-list { border-radius: 12px; border: 1px solid var(--border); overflow: hidden; background: var(--surface); }
+.doc-list { border-radius: 12px; border: 1px solid var(--border); background: var(--surface); }
+.doc-list > .doc-row:first-child { border-radius: 11px 11px 0 0; }
+.doc-list > .doc-row:last-child { border-radius: 0 0 11px 11px; }
+/* An open ⋯ menu sits above neighbouring cards and rows instead of under them. */
+.doc-card:has(.menu), .doc-row:has(.menu) { z-index: 30; }
+.doc-card .menu, .doc-row .menu { background: var(--surface); }
+.doc-row { position: relative; }
 .doc-row {
   display: grid;
   grid-template-columns: 36px minmax(0, 1fr) 160px 110px 120px 40px;
