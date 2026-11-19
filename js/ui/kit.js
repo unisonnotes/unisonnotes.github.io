@@ -295,3 +295,8 @@ export function download(filename, text, type = "text/markdown") {
   a.remove();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
+
+/** Navigate within the hash router: go("/"), go(`/d/${id}`). */
+export const go = (path) => {
+  location.hash = path;
+};
