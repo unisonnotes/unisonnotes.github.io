@@ -2024,3 +2024,8 @@ mark.hl { color: inherit; background: color-mix(in oklab, #ffd84a 45%, transpare
 .my-note .suggestion { flex-wrap: wrap; }
 .my-note .suggestion-body { min-width: calc(100% - 40px); }
 .my-note .suggestion-actions { width: 100%; justify-content: flex-end; }
+.gallery-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.tpl-art--import { display: grid; place-items: center; border-style: dashed; background: color-mix(in oklab, var(--accent) 4%, var(--page)); }
+.tpl-import { display: grid; justify-items: center; gap: 10px; color: var(--accent); }
+.tpl-import .mono { font-size: 9.5px; letter-spacing: .04em; color: var(--text-3); }
+.tpl:hover .tpl-import .icon { animation: bob 1.2s var(--ease) infinite; }

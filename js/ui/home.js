@@ -92,13 +92,16 @@ function TemplateGallery({ onPick, busy }) {
     <div class="gallery-inner">
       <div class="gallery-head">
         <span class="kicker">Start a new doc</span>
+        <button class="btn btn--sm" onClick=${() => onPick(TEMPLATES.find((t) => t.id === "import"))} disabled=${busy}><${Icon} name="file-up" size=${14} /> Import a doc</button>
       </div>
       <div class="gallery-row">
         ${TEMPLATES.map(
           (t, i) => html`<button key=${t.id} class="tpl" style=${{ "--i": i }} onClick=${() => onPick(t)} disabled=${busy}>
-            <span class=${"tpl-art" + (t.id === "blank" ? " tpl-art--blank" : "")}>
+            <span class=${"tpl-art" + (t.id === "blank" ? " tpl-art--blank" : t.id === "import" ? " tpl-art--import" : "")}>
               ${t.id === "blank"
                 ? html`<span class="tpl-plus"><${Icon} name="plus" size=${30} stroke=${1.5} /></span>`
+                : t.id === "import"
+                  ? html`<span class="tpl-import"><${Icon} name="file-up" size=${28} stroke=${1.5} /><span class="mono">.docx .md .txt .html</span></span>`
                 : html`<span class="tpl-page">
                     <span class="tpl-icon"><${Icon} name=${t.icon} size=${15} /></span>
                     ${(t.sections || ["Item one", "Item two", "Item three"]).slice(0, 4).map(
