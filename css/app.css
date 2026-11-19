@@ -885,21 +885,72 @@ code {
 .spine-empty .mono { font-size: 11px; }
 .spine-empty b { color: var(--accent); }
 /* Document tabs: listed down the side; the open tab's outline nests inside it. */
-.tab-list { list-style: none; margin: 0; padding: 0; overflow-y: auto; overflow-x: hidden; flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr); align-content: start; gap: 1px; }
-.tab-item { padding-left: calc(var(--depth, 0) * 14px); }
-.tab-row { display: flex; align-items: center; gap: 2px; border-radius: 10px; padding-right: 4px; transition: background-color var(--dur-hover); }
+.tab-tree { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+.tab-list { list-style: none; margin: 0; padding: 0 0 8px; overflow-y: auto; overflow-x: hidden; flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr); align-content: start; }
+.tab-item { position: relative; padding-left: calc(var(--depth, 0) * 16px); }
+.tab-row { position: relative; display: flex; align-items: center; gap: 0; border-radius: 10px; padding-right: 4px; transition: background-color var(--dur-hover), opacity var(--dur-hover); }
 .tab-row:hover { background: var(--surface-2); }
-.tab-btn { flex: 1; min-width: 0; display: flex; align-items: center; gap: 9px; padding: 7px 4px 7px 10px; text-align: left; color: var(--text-2); font-size: var(--text-ui); }
+.tab-row[draggable="true"] { cursor: grab; }
+.tab-row.is-dragging { opacity: .45; }
+.tab-row.is-selected { background: color-mix(in oklab, var(--accent) 16%, transparent); box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--accent) 45%, transparent); }
+.tab-row.is-drop-inside { background: color-mix(in oklab, var(--accent) 18%, transparent); box-shadow: inset 0 0 0 1.5px var(--accent); }
+.tab-row.is-drop-before::before, .tab-row.is-drop-after::after {
+  content: ""; position: absolute; left: calc(8px - var(--drop-shift, 0px)); right: 8px; height: 2px; border-radius: 2px; background: var(--accent);
+  box-shadow: 0 0 8px color-mix(in oklab, var(--accent) 60%, transparent); pointer-events: none;
+}
+.tab-row.is-drop-before::before { top: -1px; }
+.tab-row.is-drop-after::after { bottom: -1px; }
+.tab-caret { flex: none; width: 20px; height: 24px; display: grid; place-items: center; color: var(--text-3); border-radius: 6px; }
+button.tab-caret:hover { color: var(--text); background: color-mix(in oklab, var(--text) 8%, transparent); }
+.tab-btn { flex: 1; min-width: 0; display: flex; align-items: center; gap: 9px; padding: 7px 4px 7px 2px; text-align: left; color: var(--text-2); font-size: var(--text-ui); cursor: inherit; }
 .tab-btn .icon { flex: none; color: var(--text-3); }
 .tab-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.tab-count { font-size: 10.5px; color: var(--text-4); }
+.tab-btn .tab-count { font-size: 10.5px; color: var(--text-4); background: none; padding: 0; }
 .tab-row .spine-kebab { opacity: 0; }
 .tab-row:hover .spine-kebab, .tab-row .spine-kebab.is-open { opacity: 1; }
 .tab-item.is-active > .tab-row { background: color-mix(in oklab, var(--accent) 12%, transparent); }
-.tab-item.is-active .tab-btn { color: var(--text); font-weight: 600; }
-.tab-item.is-active .tab-btn .icon { color: var(--accent); }
-.tab-item .spine-list { overflow: visible; flex: none; margin: 2px 0 8px 10px; padding-left: 4px; border-left: 1px solid var(--border); }
+.tab-item.is-active > .tab-row .tab-btn { color: var(--text); font-weight: 600; }
+.tab-item.is-active > .tab-row .tab-btn .icon { color: var(--accent); }
+.tab-item .spine-list { overflow: visible; flex: none; margin: 2px 0 8px 18px; padding-left: 4px; border-left: 1px solid var(--border); }
 .tab-item .spine-empty { margin: 4px 0; }
+.tab-input { flex: 1; min-width: 0; height: 26px; padding: 0 8px; border-radius: 7px; border: 1px solid var(--accent); background: var(--surface); color: var(--text); font: inherit; font-size: var(--text-ui); outline: none; box-shadow: 0 0 0 3px color-mix(in oklab, var(--accent) 18%, transparent); }
+.tab-row--new { gap: 9px; padding: 4px 4px 4px 0; }
+.tab-row--new > .icon { color: var(--accent); flex: none; }
+/* Hover between two tabs to add one there */
+.tab-gap { position: absolute; z-index: 2; left: calc(var(--depth, 0) * 16px + 22px); right: 6px; top: -5px; height: 10px; display: flex; align-items: center; opacity: 0; transition: opacity var(--dur-hover); }
+.tab-gap i { flex: 1; height: 2px; border-radius: 2px; background: var(--accent); }
+.tab-gap span { flex: none; width: 16px; height: 16px; display: grid; place-items: center; border-radius: 50%; background: var(--accent); color: var(--accent-ink, #fff); margin-left: -1px; }
+.tab-gap:hover, .tab-gap:focus-visible { opacity: 1; }
+.tab-item:first-child .tab-gap { top: -3px; }
+.tab-add { display: flex; align-items: center; gap: 9px; width: 100%; padding: 7px 10px 7px 22px; border-radius: 10px; color: var(--text-3); font-size: var(--text-ui); }
+.tab-add:hover { background: var(--surface-2); color: var(--text); }
+.tab-add.is-drop { color: var(--accent); background: color-mix(in oklab, var(--accent) 12%, transparent); box-shadow: inset 0 0 0 1.5px var(--accent); }
+.tab-selbar { display: flex; align-items: center; gap: 4px; margin: 0 0 6px; padding: 4px 4px 4px 10px; border-radius: 10px; background: color-mix(in oklab, var(--accent) 10%, var(--surface)); border: 1px solid color-mix(in oklab, var(--accent) 30%, transparent); animation: fade-up .2s var(--ease-out); }
+.tab-selbar .mono { font-size: 11px; color: var(--text-2); white-space: nowrap; }
+.tab-selbar .btn.is-danger { color: var(--danger); }
+.tab-selbar .btn { padding: 0 7px; gap: 5px; }
+.tab-selbar .grow { min-width: 0; }
+.tab-selbar { padding: 4px 2px 4px 8px; gap: 2px; }
+.spine-item[draggable="true"] { cursor: grab; }
+.gdocs-btn { width: 100%; display: flex; align-items: center; gap: 14px; padding: 14px 16px; border-radius: 14px; border: 1px solid var(--border); background: var(--surface); text-align: left; transition: border-color var(--dur-hover), box-shadow var(--dur-hover), transform var(--dur-hover); }
+.gdocs-btn:hover:not(:disabled) { border-color: color-mix(in oklab, #4285f4 55%, var(--border)); box-shadow: 0 6px 22px color-mix(in oklab, #4285f4 18%, transparent); transform: translateY(-1px); }
+.gdocs-btn:disabled { opacity: .6; cursor: not-allowed; }
+.gdocs-icon { flex: none; width: 40px; height: 40px; display: grid; place-items: center; border-radius: 10px; background: color-mix(in oklab, #4285f4 12%, transparent); }
+.gdocs-text { flex: 1; min-width: 0; display: grid; gap: 2px; }
+.gdocs-text .muted { font-size: var(--text-sm); }
+.gdocs-btn > .icon { color: var(--text-3); }
+.import-or { display: flex; align-items: center; gap: 10px; margin: 14px 0 10px; font-size: 10.5px; letter-spacing: .12em; text-transform: uppercase; color: var(--text-4); }
+.import-or::before, .import-or::after { content: ""; flex: 1; height: 1px; background: var(--border); }
+/* Google's file picker sits above our dialogs */
+.picker-dialog-bg { z-index: 1000 !important; }
+.picker-dialog { z-index: 1001 !important; }
+.subtab-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 10px; margin: 8px 0 28px; }
+.subtab-card { display: flex; align-items: center; gap: 10px; padding: 14px 14px; border-radius: 12px; border: 1px solid var(--border); background: var(--bg-2); text-align: left; font-weight: 500; transition: border-color var(--dur-hover), transform var(--dur-hover), box-shadow var(--dur-hover); }
+.subtab-card span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.subtab-card .icon { flex: none; color: var(--text-3); }
+.subtab-card:hover { border-color: var(--border-strong); transform: translateY(-1px); box-shadow: var(--shadow-1); }
+.subtab-card:hover .icon:first-child { color: var(--accent); }
+@media print { .subtab-grid { display: none; } }
 
 /* Pictures in notes */
 .note-img { display: block; max-width: 100%; height: auto; max-height: 520px; width: auto; margin: 6px 0; border-radius: 8px; border: 1px solid var(--border); background: #fff; }

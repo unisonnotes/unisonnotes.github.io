@@ -235,7 +235,10 @@ function Composer({ ctx }) {
         resetOutline();
         toast(parent ? html`<b>${parsed.title}</b> added under ${doc.sections[parent]?.title}` : html`<b>${parsed.title}</b> added for everyone`, { icon: "hash" });
       } else {
-        const sectionId = parentId ? woven.sectionOfNote.get(parentId) ?? null : resolvedTarget;
+        let sectionId = parentId ? woven.sectionOfNote.get(parentId) ?? null : resolvedTarget;
+        // A note in an empty tab would land in Unsorted, outside the tab: start a topic named after the tab.
+        const tab = ctx.tabs.find((t) => t.id === ctx.activeTab);
+        if (!sectionId && !parentId && tab && ctx.target !== "unsorted") sectionId = await store.addSection(docId, user, tab.title, nextOrder(doc.sections), { tabId: tab.id });
         const id = await store.addNote(docId, user, { text: parsed.text, sectionId, tags: parsed.tags, parentId });
         setChain((c) => [...c.slice(0, depth), id]);
       }

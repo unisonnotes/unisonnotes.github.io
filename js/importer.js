@@ -324,6 +324,154 @@ export function docxXmlToOutline(documentXml, stylesXml, relsXml, media = new Ma
   };
 }
 
+// ───────────── Google Docs (Docs API JSON, with tabs) ─────────────
+
+const rgbIsBlank = (c) => {
+  const rgb = c?.color?.rgbColor;
+  if (!rgb) return true;
+  return (rgb.red ?? 0) > 0.97 && (rgb.green ?? 0) > 0.97 && (rgb.blue ?? 0) > 0.97;
+};
+
+/**
+ * A document from the Google Docs API (documents.get with includeTabsContent=true).
+ * Tabs keep their real names and nesting. Returns {title, items, imageUris: Map<key,
+ * url>, style}; pictures are fetched separately (their URLs are short-lived).
+ */
+export function gdocToOutline(json) {
+  const blocks = [];
+  const imageUris = new Map();
+  const fontWeight = new Map();
+  let imgN = 0;
+  let nextSectionStart = false;
+  let normal = null; // the first tab's Normal text style: the doc's font and size
+
+  const tabList = json.tabs?.length ? json.tabs : [{ tabProperties: { title: json.title }, documentTab: { body: json.body, inlineObjects: json.inlineObjects, positionedObjects: json.positionedObjects, namedStyles: json.namedStyles } }];
+  const countTabs = (tabs) => tabs.reduce((n, t) => n + 1 + countTabs(t.childTabs || []), 0);
+  const showTabs = countTabs(tabList) > 1;
+
+  const doTab = (tab, depth) => {
+    const dt = tab.documentTab || {};
+    const named = new Map((dt.namedStyles?.styles || []).map((s) => [s.namedStyleType, s.textStyle || {}]));
+    normal ??= named.get("NORMAL_TEXT") || null;
+    const image = (obj) => {
+      const uri = obj?.embeddedObject?.imageProperties?.contentUri;
+      if (!uri) return null;
+      const key = `imp${imgN++}`;
+      imageUris.set(key, uri);
+      return key;
+    };
+
+    const runsOf = (para) => {
+      const base = { ...(named.get("NORMAL_TEXT") || {}), ...(named.get(para.paragraphStyle?.namedStyleType) || {}) };
+      const runs = [];
+      let pageBreak = false;
+      for (const el of para.elements || []) {
+        if (el.textRun) {
+          const ts = { ...base, ...(el.textRun.textStyle || {}) };
+          const link = ts.link?.url && /^(https?:|mailto:)/i.test(ts.link.url) ? ts.link.url : null;
+          let text = el.textRun.content.replace(/\u000b/g, "\n").replace(/\n$/, "");
+          if (ts.baselineOffset === "SUPERSCRIPT") text = script(text, SUP) ?? `^${text}`;
+          else if (ts.baselineOffset === "SUBSCRIPT") text = script(text, SUB) ?? text;
+          const font = ts.weightedFontFamily?.fontFamily;
+          if (font && text.trim()) fontWeight.set(font, (fontWeight.get(font) || 0) + text.length);
+          runs.push({
+            text,
+            b: !!ts.bold || (ts.weightedFontFamily?.weight ?? 400) >= 600,
+            i: !!ts.italic,
+            u: !!ts.underline && !link,
+            s: !!ts.strikethrough,
+            hl: !rgbIsBlank(ts.backgroundColor),
+            code: false,
+            link,
+            size: ts.fontSize?.magnitude || null,
+          });
+        } else if (el.inlineObjectElement) {
+          const key = image(dt.inlineObjects?.[el.inlineObjectElement.inlineObjectId]?.inlineObjectProperties);
+          if (key) runs.push({ text: "", img: key });
+        } else if (el.richLink) {
+          const p = el.richLink.richLinkProperties || {};
+          runs.push({ text: p.title || p.uri || "", link: p.uri || null });
+        } else if (el.person) {
+          runs.push({ text: el.person.personProperties?.name || el.person.personProperties?.email || "" });
+        } else if (el.pageBreak) pageBreak = true;
+      }
+      for (const id of para.positionedObjectIds || []) {
+        const key = image(dt.positionedObjects?.[id]?.positionedObjectProperties);
+        if (key) runs.push({ text: "", img: key });
+      }
+      return { runs, pageBreak };
+    };
+
+    const measure = (runs) => {
+      const textRuns = runs.filter((r) => !r.img);
+      const chars = textRuns.reduce((n, r) => n + r.text.trim().length, 0);
+      const sizes = new Map();
+      for (const r of textRuns) if (r.size && r.text.trim()) sizes.set(r.size, (sizes.get(r.size) || 0) + r.text.length);
+      return {
+        textRuns,
+        chars,
+        size: [...sizes].sort((a, b) => b[1] - a[1])[0]?.[0] || null,
+        bold: chars > 0 && textRuns.filter((r) => r.b).reduce((n, r) => n + r.text.trim().length, 0) >= chars * 0.9,
+      };
+    };
+
+    const content = (elements) => {
+      for (const se of elements || []) {
+        if (se.sectionBreak) nextSectionStart = true;
+        else if (se.table) {
+          (se.table.tableRows || []).forEach((row, i) => {
+            const cells = (row.tableCells || []).map((cell) =>
+              (cell.content || [])
+                .filter((x) => x.paragraph)
+                .map((x) => runsToMd(runsOf(x.paragraph).runs))
+                .filter(Boolean)
+                .join(" / "),
+            );
+            while (cells.length > 1 && !cells[cells.length - 1].trim()) cells.pop();
+            if (!cells.some((c) => c.trim())) return;
+            const head = (c) => (!c || c.startsWith("*") ? c : `**${c}**`);
+            blocks.push({ type: "li", text: i === 0 ? cells.map(head).join(" | ") : cells.join(" | "), depth: i === 0 ? 0 : 1 });
+          });
+        } else if (se.paragraph) {
+          const para = se.paragraph;
+          const { runs, pageBreak } = runsOf(para);
+          const { textRuns, chars, size, bold } = measure(runs);
+          const imgs = runs.filter((r) => r.img).map((r) => r.img);
+          const sectionStart = nextSectionStart;
+          if (chars || imgs.length) nextSectionStart = false;
+          if (pageBreak) nextSectionStart = true;
+          const style = para.paragraphStyle?.namedStyleType || "NORMAL_TEXT";
+          const h = /^HEADING_(\d)$/.exec(style);
+          if (para.bullet) {
+            const text = runsToMd(runs);
+            if (text) blocks.push({ type: "li", text, depth: para.bullet.nestingLevel || 0, size, bold });
+            continue;
+          }
+          const text = runsToMd(textRuns);
+          if (text) blocks.push({ type: "p", text, size, bold, heading: h ? +h[1] : null, title: style === "TITLE", sectionStart });
+          for (const key of imgs) blocks.push({ type: "img", text: `![](img:${key})` });
+        }
+      }
+    };
+
+    if (showTabs) blocks.push({ type: "tab", title: tab.tabProperties?.title || "Untitled tab", depth });
+    nextSectionStart = true;
+    content(dt.body?.content);
+    for (const child of tab.childTabs || []) doTab(child, depth + 1);
+  };
+  for (const t of tabList) doTab(t, 0);
+
+  const out = inferOutline(blocks);
+  const font = normal?.weightedFontFamily?.fontFamily || [...fontWeight].sort((a, b) => b[1] - a[1])[0]?.[0];
+  const pt = normal?.fontSize?.magnitude;
+  return {
+    title: json.title || out.title,
+    items: out.items,
+    imageUris,
+    style: { font: font ? fontId(font) : undefined, size: pt ? Math.max(10, Math.min(28, Math.round((pt * 4) / 3))) : undefined },
+  };
+}
+
 // ───────────── HTML (Google Docs "Web page", any page, rich paste) ─────────────
 
 export function htmlToOutline(source) {

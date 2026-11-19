@@ -3,6 +3,7 @@ import "./themes.js";
 import { firebaseConfig } from "./config.js";
 import { createLocalBackend } from "./backend/local.js";
 import { initStore, saveProfile, watchInvites, acceptInvite } from "./store.js";
+import { initGoogle } from "./gdocs.js";
 import { Logo, ToastHost, DialogHost, toast } from "./ui/kit.js";
 import { SignIn } from "./ui/signin.js";
 import { Landing } from "./ui/landing.js";
@@ -88,6 +89,7 @@ async function boot() {
     backend = await createLocalBackend();
   }
   initStore(backend);
+  initGoogle(backend);
   document.documentElement.dataset.backend = backend.db.kind;
   render(html`<${App} backend=${backend} />`, root);
 }

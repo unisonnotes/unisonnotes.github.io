@@ -233,11 +233,18 @@ export async function importOutline(
   // Pictures that couldn't be stored are left out rather than shown broken.
   const fixImages = (text) =>
     imageIds ? text.replace(/!\[([^\]]*)\]\(img:([\w-]+)\)/g, (m, alt, key) => (imageIds.has(key) ? `![${alt}](img:${imageIds.get(key)})` : "")).trim() : text;
+  const childOrder = new Map(); // parent tab id → next order among its children
   plan.forEach((it, i) => {
     if (it.kind === "tab") {
       const id = db.key();
       ids.set(i, id);
-      structure[`docs/${docId}/tabs/${id}`] = { title: it.text, createdBy: user.uid, createdAt: db.TIMESTAMP, order: tabOrder++ };
+      const parentId = it.parent != null ? ids.get(it.parent) : null;
+      let order = tabOrder;
+      if (parentId) {
+        order = childOrder.get(parentId) || 0;
+        childOrder.set(parentId, order + 1);
+      } else tabOrder++;
+      structure[`docs/${docId}/tabs/${id}`] = { title: it.text, createdBy: user.uid, createdAt: db.TIMESTAMP, order, ...(parentId ? { parentId } : {}) };
       return;
     }
     if (it.kind === "section") {
@@ -304,8 +311,34 @@ export async function addTab(docId, user, title, order, parentId = null) {
   return id;
 }
 export const renameTab = (docId, tabId, title) => db.set(`docs/${docId}/tabs/${tabId}/title`, title.trim() || "Untitled tab");
-export const reorderTabs = (docId, ids) =>
-  db.update(Object.fromEntries(ids.map((id, i) => [`docs/${docId}/tabs/${id}/order`, i])));
+/** Put tabs where they belong: moves = [{id, parentId, order}] (a drag, indent, outdent). */
+export const arrangeTabs = (docId, moves) =>
+  db.update(
+    Object.fromEntries(
+      moves.flatMap((m) => [
+        [`docs/${docId}/tabs/${m.id}/parentId`, m.parentId || null],
+        [`docs/${docId}/tabs/${m.id}/order`, m.order],
+      ]),
+    ),
+  );
+/**
+ * Merge tabs into `intoId` in one write: their topics (with subtopics) and child tabs
+ * move over, then the merged tabs are removed.
+ */
+export const mergeTabs = (docId, intoId, mergedIds, sectionMoves, childMoves) =>
+  db.update(
+    Object.fromEntries([
+      ...sectionMoves.flatMap((m) => [
+        [`docs/${docId}/sections/${m.id}/tabId`, intoId],
+        [`docs/${docId}/sections/${m.id}/order`, m.order],
+      ]),
+      ...childMoves.flatMap((m) => [
+        [`docs/${docId}/tabs/${m.id}/parentId`, m.parentId || null],
+        [`docs/${docId}/tabs/${m.id}/order`, m.order],
+      ]),
+      ...mergedIds.map((id) => [`docs/${docId}/tabs/${id}`, null]),
+    ]),
+  );
 /** Delete a tab, its child tabs and their topics; their notes fall back to Unsorted. */
 export const deleteTab = (docId, tabIds, sectionIds) =>
   db.update(
@@ -318,7 +351,6 @@ export const deleteTab = (docId, tabIds, sectionIds) =>
 export const moveSectionToTab = (docId, sid, tabId, order) =>
   db.update({
     [`docs/${docId}/sections/${sid}/tabId`]: tabId,
-    [`docs/${docId}/sections/${sid}/parentId`]: null,
     [`docs/${docId}/sections/${sid}/order`]: order,
   });
 

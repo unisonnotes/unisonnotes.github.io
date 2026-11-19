@@ -4,6 +4,7 @@ import { html } from "./h.js";
 import { Icon } from "./icons.js";
 import { Menu, Avatar, ask, toast, clock } from "./kit.js";
 import * as store from "../store.js";
+import { TabTree, TOPIC_MIME, endOrder } from "./tabs.js";
 
 function SectionMenu({ ctx, s }) {
   const { docId, user, isOwner, canEdit, woven } = ctx;
@@ -43,7 +44,7 @@ function SectionMenu({ ctx, s }) {
                 icon: "panel-top",
                 disabled: !canEdit,
                 onSelect: async () => {
-                  await store.moveSectionToTab(docId, s.id, t.id, ctx.fullWoven.sections.filter((x) => x.tab === t.id && !x.parentId).length);
+                  await store.moveSectionToTab(docId, s.id, t.id, endOrder(ctx.fullWoven, t.id));
                   toast(html`<b>${s.title}</b> moved to ${t.title}`, { icon: "panel-top" });
                 },
               })),
@@ -92,69 +93,6 @@ function SectionMenu({ ctx, s }) {
   />`;
 }
 
-function TabMenu({ ctx, tab, onAddTab }) {
-  const { docId, user, isOwner, canEdit, tabs, fullWoven } = ctx;
-  const mine = tab.createdBy === user.uid || isOwner;
-  const siblings = tabs.filter((t) => (t.parentId || null) === (tab.parentId || null));
-  const index = siblings.findIndex((t) => t.id === tab.id);
-  const swap = (dir) => {
-    const ids = siblings.map((t) => t.id);
-    [ids[index], ids[index + dir]] = [ids[index + dir], ids[index]];
-    store.reorderTabs(docId, ids);
-  };
-  // The tab and every tab nested in it.
-  const family = [tab.id];
-  for (const t of tabs) if (t.parentId && family.includes(t.parentId)) family.push(t.id);
-  return html`<${Menu}
-    align="right"
-    width=${220}
-    trigger=${(open, toggle) => html`<button class=${"icon-btn icon-btn--sm spine-kebab" + (open ? " is-open" : "")} onClick=${(e) => (e.stopPropagation(), toggle())} aria-label="Tab actions"><${Icon} name="more-horizontal" size=${15} /></button>`}
-    items=${[
-      {
-        label: "Rename…",
-        icon: "pencil",
-        disabled: !mine,
-        onSelect: async () => {
-          const t = await ask({ title: "Rename tab", input: { value: tab.title }, confirm: "Rename", icon: "pencil" });
-          if (t) store.renameTab(docId, tab.id, t);
-        },
-      },
-      { label: "Add sub-tab", icon: "corner-down-left", disabled: !canEdit || tab.depth >= 2, onSelect: () => onAddTab(tab.id) },
-      { sep: true },
-      { label: "Move up", icon: "arrow-up", disabled: !canEdit || index <= 0, onSelect: () => swap(-1) },
-      { label: "Move down", icon: "arrow-down", disabled: !canEdit || index === siblings.length - 1, onSelect: () => swap(1) },
-      { sep: true },
-      {
-        label: "Delete tab",
-        icon: "trash-2",
-        danger: true,
-        disabled: !mine,
-        onSelect: async () => {
-          const sections = fullWoven.sections.filter((s) => family.includes(s.tab));
-          const notes = sections.reduce((n, s) => n + s.noteCount, 0);
-          const subs = family.length - 1;
-          const sure = await ask({
-            title: `Delete tab “${tab.title}”?`,
-            body: [
-              sections.length ? `Its ${sections.length} topic${sections.length === 1 ? " is" : "s are"} removed${notes ? ` and their ${notes} notes move to Unsorted` : ""}.` : "",
-              subs ? `Its ${subs} sub-tab${subs === 1 ? " goes" : "s go"} too.` : "",
-              "Nobody's notes are deleted.",
-            ]
-              .filter(Boolean)
-              .join(" "),
-            confirm: "Delete tab",
-            danger: true,
-            icon: "trash-2",
-          });
-          if (!sure) return;
-          await store.deleteTab(docId, family, sections.map((s) => s.id));
-          toast("Tab deleted", { icon: "trash-2" });
-        },
-      },
-    ]}
-  />`;
-}
-
 function Topics({ ctx }) {
   const { woven, canEdit, resolvedTarget, writersIn, showHeat, activeSection, showTimes, latest, tabs } = ctx;
   const sections = woven.sections;
@@ -167,6 +105,13 @@ function Topics({ ctx }) {
         class=${`spine-item spine-item--d${Math.min(s.depth, 2)}` + (resolvedTarget === s.id && canEdit ? " is-target" : "") + (activeSection === s.id ? " is-active" : "") + (hot ? " is-hot" : "")}
         style=${{ "--heat-amt": showHeat ? s.heat : 0, "--i": Math.min(i, 30), "--depth": s.depth }}
         onClick=${() => ctx.scrollToSection(s.id)}
+        draggable=${canEdit && tabs.length > 1 && !s.parentId}
+        onDragStart=${(e) => {
+          e.dataTransfer.setData(TOPIC_MIME, s.id);
+          e.dataTransfer.setData("text/plain", s.title);
+          e.dataTransfer.effectAllowed = "move";
+        }}
+        title=${canEdit && tabs.length > 1 && !s.parentId ? "Drag onto a tab to move it there" : undefined}
       >
         <span class="spine-rail" aria-hidden="true"><i /></span>
         <span class="spine-num mono">${s.depth ? s.number.slice(s.number.indexOf(".")) : s.number}</span>
@@ -197,9 +142,7 @@ function Topics({ ctx }) {
 }
 
 export function Spine({ ctx, onAddSection, onAgenda, onAddTab }) {
-  const { woven, fullWoven, canEdit, resolvedTarget, showHeat, tabs, activeTab } = ctx;
-  const notesIn = new Map();
-  for (const s of fullWoven.sections) notesIn.set(s.tab, (notesIn.get(s.tab) || 0) + s.noteCount);
+  const { woven, canEdit, resolvedTarget, showHeat, tabs } = ctx;
   const addMenu = canEdit &&
     html`<${Menu}
       align="right"
@@ -218,23 +161,7 @@ export function Spine({ ctx, onAddSection, onAgenda, onAddTab }) {
       <span class="spine-count mono">${tabs.length || woven.sections.length}</span>
       ${addMenu}
     </div>
-    ${tabs.length
-      ? html`<ol class="tab-list">
-          ${tabs.map(
-            (t) => html`<li key=${t.id} class=${"tab-item" + (t.id === activeTab ? " is-active" : "")} style=${{ "--depth": t.depth }}>
-              <div class="tab-row">
-                <button class="tab-btn" onClick=${() => (t.id === activeTab ? ctx.scrollToSection(woven.sections[0]?.id) : ctx.setActiveTab(t.id))} title=${t.title}>
-                  <${Icon} name=${t.id === activeTab ? "file-text" : "file"} size=${14} />
-                  <span class="tab-name">${t.title}</span>
-                  <span class="tab-count mono">${notesIn.get(t.id) || 0}</span>
-                </button>
-                <${TabMenu} ctx=${ctx} tab=${t} onAddTab=${onAddTab} />
-              </div>
-              ${t.id === activeTab && html`<${Topics} ctx=${ctx} />`}
-            </li>`,
-          )}
-        </ol>`
-      : html`<${Topics} ctx=${ctx} />`}
+    ${tabs.length ? html`<${TabTree} ctx=${ctx} onAddTab=${onAddTab} topics=${html`<${Topics} ctx=${ctx} />`} />` : html`<${Topics} ctx=${ctx} />`}
 
     <button class=${"spine-unsorted" + (woven.unsorted.length ? " has-items" : "") + (resolvedTarget === null && canEdit ? " is-target" : "")} onClick=${() => ctx.scrollToSection(null)}>
       <${Icon} name="inbox" size=${15} />

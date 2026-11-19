@@ -54,6 +54,10 @@
             "order": {
               ".write": "auth != null && (root.child('docs/' + $docId + '/members/' + auth.uid + '/role').val() === 'owner' || root.child('docs/' + $docId + '/members/' + auth.uid + '/role').val() === 'editor')",
               ".validate": "newData.isNumber()"
+            },
+            "parentId": {
+              ".write": "auth != null && (root.child('docs/' + $docId + '/members/' + auth.uid + '/role').val() === 'owner' || root.child('docs/' + $docId + '/members/' + auth.uid + '/role').val() === 'editor')",
+              ".validate": "newData.isString() && newData.val() !== $tid && newData.parent().parent().child(newData.val()).exists()"
             }
           }
         },
@@ -66,6 +70,10 @@
             "order": {
               ".write": "auth != null && (root.child('docs/' + $docId + '/members/' + auth.uid + '/role').val() === 'owner' || root.child('docs/' + $docId + '/members/' + auth.uid + '/role').val() === 'editor')",
               ".validate": "newData.isNumber()"
+            },
+            "tabId": {
+              ".write": "auth != null && (root.child('docs/' + $docId + '/members/' + auth.uid + '/role').val() === 'owner' || root.child('docs/' + $docId + '/members/' + auth.uid + '/role').val() === 'editor')",
+              ".validate": "newData.isString() && newData.parent().parent().parent().child('tabs/' + newData.val()).exists()"
             },
             "claim": {
               ".write": "auth != null && (root.child('docs/' + $docId + '/members/' + auth.uid + '/role').val() === 'owner' || (root.child('docs/' + $docId + '/members/' + auth.uid + '/role').val() === 'editor' && (newData.exists() ? newData.child('uid').val() === auth.uid : data.child('uid').val() === auth.uid)))"

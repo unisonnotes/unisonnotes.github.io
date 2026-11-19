@@ -4,6 +4,7 @@ import { html, useState, useEffect, useRef, useMemo } from "./h.js";
 import { Icon } from "./icons.js";
 import { Modal, toast } from "./kit.js";
 import { readImport, htmlToOutline, textToOutline } from "../importer.js";
+import { pickGoogleDoc, readGoogleDoc, googleDocsAvailable } from "../gdocs.js";
 import { planOutline } from "../weave.js";
 import { importOutline } from "../store.js";
 import { addImages } from "../images.js";
@@ -89,6 +90,25 @@ export function ImportModal({ open, onClose, onImport, mode = "new" }) {
     }
   };
 
+  /** Straight from Google Docs: real tab names and nesting. Starts the popup from this click. */
+  const fromGoogle = async () => {
+    setError("");
+    try {
+      const picked = await pickGoogleDoc();
+      if (!picked) return;
+      setBusy(true);
+      setProgress({ label: "Downloading pictures", done: 0, total: 0 });
+      const r = await readGoogleDoc(picked, (done, total) => setProgress({ label: "Downloading pictures", done, total }));
+      take(r, `${picked.name} · Google Docs`);
+      if (r.skipped) toast(`${r.skipped} picture${r.skipped === 1 ? "" : "s"} couldn't be downloaded and will be left out`, { icon: "triangle-alert" });
+    } catch (e) {
+      setError(e.message || "Couldn't read that Google Doc.");
+    } finally {
+      setBusy(false);
+      setProgress(null);
+    }
+  };
+
   const onPaste = (e) => {
     const rich = e.clipboardData?.getData("text/html");
     const plain = e.clipboardData?.getData("text/plain") || "";
@@ -136,7 +156,16 @@ export function ImportModal({ open, onClose, onImport, mode = "new" }) {
           </button>`}
   >
     ${!result
-      ? html`<div
+      ? html`<button class="gdocs-btn" onClick=${fromGoogle} disabled=${busy || !googleDocsAvailable()}>
+            <span class="gdocs-icon" aria-hidden="true"><svg viewBox="0 0 24 24" width="22" height="22"><path fill="#4285F4" d="M14.5 2H6.5A1.5 1.5 0 0 0 5 3.5v17A1.5 1.5 0 0 0 6.5 22h11a1.5 1.5 0 0 0 1.5-1.5V6.5z"/><path fill="#A1C2FA" d="M14.5 2v3a1.5 1.5 0 0 0 1.5 1.5h3z"/><path fill="#fff" d="M8 11h8v1.2H8zm0 2.6h8v1.2H8zm0 2.6h5.5v1.2H8z"/></svg></span>
+            <span class="gdocs-text">
+              <b>${busy ? "Reading…" : "Import from Google Docs"}</b>
+              <span class="muted">${googleDocsAvailable() ? "Keeps tab names and nesting exactly, plus formatting and pictures" : "Needs Google sign-in (not available in Local mode)"}</span>
+            </span>
+            <${Icon} name="arrow-right" />
+          </button>
+          <div class="import-or mono">or a file</div>
+          <div
             class=${"dropzone" + (drag ? " is-drag" : "")}
             onDragOver=${(e) => (e.preventDefault(), setDrag(true))}
             onDragLeave=${() => setDrag(false)}
@@ -148,14 +177,14 @@ export function ImportModal({ open, onClose, onImport, mode = "new" }) {
           >
             <span class="dropzone-icon"><${Icon} name="file-up" size=${26} stroke=${1.5} /></span>
             <b>${busy ? "Reading…" : "Drop a file here"}</b>
-            <span class="muted">Word (.docx), Google Docs, Markdown (.md), web page (.html) or plain text</span>
+            <span class="muted">Word (.docx), Markdown (.md), web page (.html) or plain text</span>
             <button class="btn" onClick=${() => fileRef.current.click()} disabled=${busy}><${Icon} name="file-text" /> Choose a file</button>
             <input ref=${fileRef} type="file" accept=${ACCEPT} hidden onChange=${(e) => onFile(e.target.files?.[0])} />
           </div>
           <div class="paste-zone">
             <textarea class="field field--area" rows="3" placeholder="…or click here and paste (Ctrl+V). Copying straight out of Google Docs or Word keeps headings, lists and formatting." onPaste=${onPaste} />
           </div>
-          <p class="import-tip"><${Icon} name="circle-help" size=${14} /> From Google Docs: <b>File → Download → Microsoft Word (.docx)</b>. Tabs, pictures and formatting come along.</p>
+          <p class="import-tip"><${Icon} name="circle-help" size=${14} /> A Google Docs .docx download loses tab names and nesting; “Import from Google Docs” keeps them.</p>
           ${error && html`<p class="import-error"><${Icon} name="triangle-alert" size=${14} /> ${error}</p>`}`
       : html`<div class="import-source mono"><${Icon} name="check" size=${14} /> ${result.source}</div>
           ${mode === "new" &&

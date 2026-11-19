@@ -32,7 +32,32 @@ export async function createFirebaseBackend() {
       await A.signInWithPopup(fauth, provider);
     },
     signOut: () => A.signOut(fauth),
+    /**
+     * A Google OAuth access token with extra `scopes` for the signed-in account (asks in
+     * a popup the first time, then reuses it for about 50 minutes). Call from a click.
+     */
+    async googleToken(scopes) {
+      const key = scopes.join(" ");
+      if (token && token.key === key && token.exp > Date.now()) return token.value;
+      const provider = new A.GoogleAuthProvider();
+      scopes.forEach((s) => provider.addScope(s));
+      provider.setCustomParameters({ login_hint: fauth.currentUser?.email || "" });
+      let res;
+      try {
+        res = await A.reauthenticateWithPopup(fauth.currentUser, provider);
+      } catch (e) {
+        if (e.code === "auth/user-mismatch") throw new Error(`Pick the same Google account you're signed in with (${fauth.currentUser.email}).`);
+        if (e.code === "auth/popup-closed-by-user" || e.code === "auth/cancelled-popup-request") return null;
+        if (e.code === "auth/popup-blocked") throw new Error("Your browser blocked the Google window. Allow popups for this site and try again.");
+        throw e;
+      }
+      const value = A.GoogleAuthProvider.credentialFromResult(res)?.accessToken;
+      if (!value) throw new Error("Google didn't grant access.");
+      token = { key, value, exp: Date.now() + 50 * 60_000 };
+      return value;
+    },
   };
+  let token = null;
 
   const db = {
     kind: "firebase",

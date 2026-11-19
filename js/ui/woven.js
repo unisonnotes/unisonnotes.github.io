@@ -314,6 +314,7 @@ export function WovenPage({ ctx }) {
   const targetSection = woven.sections.find((s) => s.id === ctx.resolvedTarget);
 
   const tab = ctx.tabs.find((t) => t.id === ctx.activeTab);
+  const subTabs = tab ? ctx.tabs.filter((t) => t.parentId === tab.id) : [];
   return html`<article class="page" ref=${pageRef}>
     <div class="page-kicker mono">
       ${tab ? html`<span>${doc.meta.title}</span><span>·</span><span>tab ${ctx.tabs.indexOf(tab) + 1} of ${ctx.tabs.length}</span>` : html`<span>Woven notes</span>`}
@@ -334,7 +335,19 @@ export function WovenPage({ ctx }) {
       )}
     </div>`}
 
+    ${subTabs.length > 0 &&
+    html`<nav class="subtab-grid" aria-label="Tabs in this tab">
+      ${subTabs.map(
+        (t) => html`<button key=${t.id} class="subtab-card" onClick=${() => ctx.setActiveTab(t.id)}>
+          <${Icon} name="file-text" size=${16} />
+          <span>${t.title}</span>
+          <${Icon} name="arrow-right" size=${14} />
+        </button>`,
+      )}
+    </nav>`}
+
     ${empty &&
+    !subTabs.length &&
     html`<div class="page-empty">
       <div class="weave-art" aria-hidden="true">
         <svg viewBox="0 0 120 80"><path pathLength="1" d="M20 6c0 30 40 26 40 60" style="--who:var(--a1)"/><path pathLength="1" d="M60 6v60" style="--who:var(--a2)"/><path pathLength="1" d="M100 6c0 30-40 26-40 60" style="--who:var(--a3)"/></svg>

@@ -558,10 +558,11 @@ const plainText = (s) => s.replace(/!\[[^\]]*\]\([^)]*\)/g, "").replace(/\[([^\]
  * bulleted list is a label for it, the first line after a page/section break starts a
  * new part, and noticeably bigger text is a heading.
  *
- * blocks: [{type: "p"|"li"|"img", text, depth?, heading? (1–6 from a style),
+ * blocks: [{type: "p"|"li"|"img"|"tab", text, depth?, heading? (1–6 from a style),
  *           title? (Title style), size? (pt), bold? (whole line), sectionStart?}]
+ *   A "tab" block starts a document tab: {type: "tab", title?, depth?}.
  * Returns {title, items}: items are {kind: "section", text, rank} (lower rank = higher
- * level) or {kind: "note", text, depth}.
+ * level), {kind: "note", text, depth} or {kind: "tab", text, depth}.
  */
 export function inferOutline(blocks) {
   const real = blocks.filter((b) => b.type === "img" || b.type === "tab" || (b.text && b.text.trim()));
@@ -606,7 +607,7 @@ export function inferOutline(blocks) {
   let items = [];
   real.forEach((b, i) => {
     if (b.type === "tab") {
-      items.push({ kind: "tab", text: null });
+      items.push({ kind: "tab", text: b.title || null, depth: b.depth || 0 });
       return;
     }
     const rank = rankOf(b, i);
@@ -635,9 +636,11 @@ export function inferOutline(blocks) {
 }
 
 /**
- * Tabs from another app: name each by its first line, drop tabs with no notes (cover
- * pages and title-only dividers), and give notes that come before any heading in a tab
- * a topic named after the tab.
+ * Tabs from another app. Named tabs (Google Docs) keep their name and nesting, even
+ * when empty: in Google Docs a parent tab often only groups its children. Unnamed tabs
+ * (a .docx, where only the breaks survive) are named by their first line, and those
+ * without notes (cover pages, title-only dividers) are dropped. Notes that come before
+ * any heading in a tab get a topic named after the tab.
  */
 function shapeTabs(items, titleTab) {
   const groups = [];
@@ -646,20 +649,25 @@ function shapeTabs(items, titleTab) {
     if (it.kind !== "tab") groups[groups.length - 1].body.push(it);
   }
   const top = Math.min(...items.filter((i) => i.kind === "section").map((i) => i.rank), 10);
+  const same = (a, b) => plainText(a).replace(/[^\p{L}\p{N}]+/gu, "").toLowerCase() === plainText(b).replace(/[^\p{L}\p{N}]+/gu, "").toLowerCase();
   const out = [];
   groups.forEach((g, gi) => {
-    if (!g.body.some((i) => i.kind === "note")) return;
+    const hasNotes = g.body.some((i) => i.kind === "note");
     if (!g.head) {
-      out.push(...g.body);
+      if (hasNotes) out.push(...g.body);
       return;
     }
+    const named = !!g.head.text;
+    if (!named && !hasNotes) return;
     const first = g.body[0];
-    let name = gi === 0 && titleTab ? "Cover" : first.kind === "section" ? first.text : plainText(first.text).replace(/\s+/g, " ").trim();
-    if (name.length > 60) name = name.slice(0, 57).trimEnd() + "…";
-    out.push({ kind: "tab", text: name });
+    let name = g.head.text || (gi === 0 && titleTab ? "Cover" : first.kind === "section" ? first.text : plainText(first.text).replace(/\s+/g, " ").trim());
+    if (!named && name.length > 60) name = name.slice(0, 57).trimEnd() + "…";
+    out.push({ kind: "tab", text: name, depth: g.head.depth || 0 });
+    if (!hasNotes) return; // a grouping tab: its headings alone would just repeat its name
     let body = g.body;
     // A tab's first line usually repeats its name; when it only wraps other topics, drop it.
-    if (first.kind === "section" && body[1]?.kind === "section" && !body.slice(1).some((i) => i.kind === "section" && i.rank <= first.rank)) body = body.slice(1);
+    const wraps = first.kind === "section" && body[1]?.kind === "section" && !body.slice(1).some((i) => i.kind === "section" && i.rank <= first.rank);
+    if (wraps && (!named || same(first.text, name))) body = body.slice(1);
     else if (first.kind !== "section") out.push({ kind: "section", text: name, rank: top });
     out.push(...body);
   });
@@ -673,6 +681,7 @@ function shapeTabs(items, titleTab) {
  */
 export function planOutline(items, maxDepth = 2) {
   const stack = [];
+  const tabs = []; // open tab per depth
   let notes = [];
   let tab = null;
   return items.map((it, idx) => {
@@ -680,7 +689,10 @@ export function planOutline(items, maxDepth = 2) {
       stack.length = 0;
       notes = [];
       tab = idx;
-      return { ...it };
+      const depth = Math.min(it.depth || 0, tabs.length, maxDepth);
+      tabs.length = depth;
+      tabs.push(idx);
+      return { ...it, depth, parent: depth > 0 ? tabs[depth - 1] : null };
     }
     if (it.kind === "section") {
       const rank = it.rank ?? it.level ?? 0;
