@@ -1,0 +1,82 @@
+{
+  "rules": {
+    "users": {
+      "$uid": {
+        ".read": "auth != null && auth.uid === $uid",
+        ".write": "auth != null && auth.uid === $uid"
+      }
+    },
+
+    "invites": {
+      "$emailKey": {
+        ".read": "auth != null && auth.token.email_verified === true && auth.token.email.toLowerCase().replace('.', ',') === $emailKey",
+        "$docId": {
+          ".write": "auth != null && (root.child('docs/' + $docId + '/meta/owner').val() === auth.uid || (!newData.exists() && auth.token.email_verified === true && auth.token.email.toLowerCase().replace('.', ',') === $emailKey))",
+          ".validate": "newData.hasChildren(['role', 'invitedBy']) && (newData.child('role').val() === 'editor' || newData.child('role').val() === 'viewer')"
+        }
+      }
+    },
+
+    "docs": {
+      "$docId": {
+        ".read": "auth != null && data.child('members/' + auth.uid).exists()",
+        ".write": "auth != null && data.child('meta/owner').val() === auth.uid && !newData.exists()",
+
+        "meta": {
+          ".write": "auth != null && (data.exists() ? data.child('owner').val() === auth.uid : newData.child('owner').val() === auth.uid)",
+          ".validate": "newData.hasChildren(['title', 'owner', 'createdAt']) && newData.child('owner').val() === (data.exists() ? data.child('owner').val() : auth.uid)",
+          "title": { ".validate": "newData.isString() && newData.val().length > 0 && newData.val().length <= 200" }
+        },
+
+        "members": {
+          "$uid": {
+            ".write": "auth != null && (newData.parent().parent().child('meta/owner').val() === auth.uid || (auth.uid === $uid && !data.exists() && newData.child('role').val() === root.child('invites/' + auth.token.email.toLowerCase().replace('.', ',') + '/' + $docId + '/role').val()) || (auth.uid === $uid && !newData.exists() && data.child('role').val() !== 'owner'))",
+            ".validate": "newData.hasChildren(['role']) && (newData.child('role').val() === 'editor' || newData.child('role').val() === 'viewer' || (newData.child('role').val() === 'owner' && $uid === newData.parent().parent().child('meta/owner').val()))"
+          }
+        },
+
+        "sections": {
+          "$sid": {
+            ".write": "auth != null && (root.child('docs/' + $docId + '/members/' + auth.uid + '/role').val() === 'owner' || (root.child('docs/' + $docId + '/members/' + auth.uid + '/role').val() === 'editor' && (!data.exists() || data.child('createdBy').val() === auth.uid))) || (auth != null && !data.exists() && newData.parent().parent().child('meta/owner').val() === auth.uid)",
+            ".validate": "newData.hasChildren(['title', 'createdBy', 'createdAt'])",
+            "title": { ".validate": "newData.isString() && newData.val().length > 0 && newData.val().length <= 200" },
+            "order": {
+              ".write": "auth != null && (root.child('docs/' + $docId + '/members/' + auth.uid + '/role').val() === 'owner' || root.child('docs/' + $docId + '/members/' + auth.uid + '/role').val() === 'editor')",
+              ".validate": "newData.isNumber()"
+            },
+            "claim": {
+              ".write": "auth != null && (root.child('docs/' + $docId + '/members/' + auth.uid + '/role').val() === 'owner' || (root.child('docs/' + $docId + '/members/' + auth.uid + '/role').val() === 'editor' && (newData.exists() ? newData.child('uid').val() === auth.uid : data.child('uid').val() === auth.uid)))"
+            }
+          }
+        },
+
+        "notes": {
+          "$nid": {
+            ".write": "auth != null && (root.child('docs/' + $docId + '/members/' + auth.uid + '/role').val() === 'owner' || root.child('docs/' + $docId + '/members/' + auth.uid + '/role').val() === 'editor') && (data.exists() ? data.child('author').val() === auth.uid : newData.child('author').val() === auth.uid)",
+            ".validate": "newData.hasChildren(['author', 'text', 'createdAt']) && newData.child('author').val() === auth.uid",
+            "text": { ".validate": "newData.isString() && newData.val().length > 0 && newData.val().length <= 4000" }
+          }
+        },
+
+        "merges": {
+          "$nid": {
+            ".write": "auth != null && (root.child('docs/' + $docId + '/members/' + auth.uid + '/role').val() === 'owner' || root.child('docs/' + $docId + '/members/' + auth.uid + '/role').val() === 'editor')",
+            ".validate": "newData.isString() && root.child('docs/' + $docId + '/notes/' + $nid).exists()"
+          }
+        },
+
+        "presence": {
+          "$uid": {
+            ".write": "auth != null && ((auth.uid === $uid && (root.child('docs/' + $docId + '/members/' + auth.uid).exists() || !newData.exists())) || (!newData.exists() && root.child('docs/' + $docId + '/meta/owner').val() === auth.uid))"
+          }
+        },
+
+        "invites": {
+          "$emailKey": {
+            ".write": "auth != null && (root.child('docs/' + $docId + '/meta/owner').val() === auth.uid || (!newData.exists() && auth.token.email_verified === true && auth.token.email.toLowerCase().replace('.', ',') === $emailKey))"
+          }
+        }
+      }
+    }
+  }
+}

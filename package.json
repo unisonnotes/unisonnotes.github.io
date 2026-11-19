@@ -1,0 +1,10 @@
+{
+  "name": "unison-notes",
+  "private": true,
+  "type": "module",
+  "description": "Group notes where everyone writes alone and the app weaves one shared doc.",
+  "scripts": {
+    "test": "node --test tests/*.test.mjs",
+    "serve": "npx --yes http-server -p 5173 -c-1 ."
+  }
+}
