@@ -152,8 +152,18 @@ export function docxXmlToOutline(documentXml, stylesXml, relsXml, media = new Ma
 
   // styleId → heading level / title, plus style-level run defaults (size, bold).
   const styles = new Map();
+  // The doc's default font and size (Word keeps them here rather than on every run).
+  const defaults = { font: null, size: null };
   if (stylesXml) {
-    for (const st of parse(stylesXml).getElementsByTagNameNS(W, "style")) {
+    const sx = parse(stylesXml);
+    const normal = [...sx.getElementsByTagNameNS(W, "style")].find((st) => attr(st, "type") === "paragraph" && attr(st, "default") === "1");
+    for (const r of [kid(normal, "rPr"), kid(sx.getElementsByTagNameNS(W, "rPrDefault")[0], "rPr")]) {
+      const f = kid(r, "rFonts");
+      defaults.font ??= f?.getAttributeNS(W, "ascii") || f?.getAttribute("w:ascii") || null;
+      const sz = attr(kid(r, "sz"), "val");
+      if (sz && !defaults.size) defaults.size = +sz / 2;
+    }
+    for (const st of sx.getElementsByTagNameNS(W, "style")) {
       const id = attr(st, "styleId");
       const name = (attr(kid(st, "name"), "val") || "").toLowerCase();
       const outline = attr(kid(kid(st, "pPr"), "outlineLvl"), "val");
@@ -313,10 +323,10 @@ export function docxXmlToOutline(documentXml, stylesXml, relsXml, media = new Ma
   visit(body);
 
   const out = inferOutline(blocks);
-  const font = [...fontWeight].sort((a, b) => b[1] - a[1])[0]?.[0];
+  const font = [...fontWeight].sort((a, b) => b[1] - a[1])[0]?.[0] || defaults.font;
   const sizeWeight = new Map();
   for (const b of blocks) if (b.size && b.type !== "img") sizeWeight.set(b.size, (sizeWeight.get(b.size) || 0) + b.text.length);
-  const pt = [...sizeWeight].sort((a, b) => b[1] - a[1])[0]?.[0];
+  const pt = [...sizeWeight].sort((a, b) => b[1] - a[1])[0]?.[0] || defaults.size;
   return {
     ...out,
     images,

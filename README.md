@@ -20,7 +20,7 @@ Live: https://unisonnotes.github.io
 - **Print**: Print / save as PDF produces a plain document (title, byline, headings, bullet lists) from the woven doc or the edited copy.
 - **Hashtags**: a `#tag` used by 2+ people becomes a section and pulls those notes in.
 - **Weaving** (in each browser, `js/weave.js`): duplicates collapse into one point with a ×N badge, points only one person wrote get a *solo* marker, similar notes with different numbers or dates are flagged, thin sections glow (gap heatmap) and can be claimed. Paraphrases the word matcher misses can be merged by hand.
-- **Export**: Markdown with credits, or Print → PDF of the woven page.
+- **Export**: Word (.docx: headings, nested bullet/numbered lists, formatting, links, pictures; each tab starts a new page; opens in Word, Google Docs and Pages), Markdown with credits, or Print → PDF. In Edit mode, Word and PDF export the final copy.
 
 ## Run locally
 
@@ -74,6 +74,7 @@ js/app.js             boot, router (#/ and #/d/<id>), invite acceptance
 js/store.js           all database reads/writes
 js/weave.js           placement, duplicates, conflicts, heat, tabs, structure inference, export
 js/importer.js        .docx / .html / .md / .txt → outline with formatting and pictures
+js/docx.js            HTML → .docx (Word export), with its own zip writer
 js/images.js          shrink, store and lazily load pictures
 js/backend/           firebase.js and local.js behind the same adapter
 js/ui/                Preact + htm components

@@ -14,8 +14,9 @@ import { Tour, TOUR_KEY } from "./tour.js";
 import { EditMode } from "./editor.js";
 import { ImportModal, importInto } from "./import.js";
 import { FONTS, SPACINGS, DEFAULT_STYLE, fontCss, styleVars } from "./format.js";
-import { weave, tagsNeedingSections, tagTitle, nextOrder, latestSection, orderedTabs, toMarkdown, agendaToSections } from "../weave.js";
-import { setImageDoc } from "../images.js";
+import { weave, tagsNeedingSections, tagTitle, nextOrder, latestSection, orderedTabs, toMarkdown, weaveToHtml, agendaToSections } from "../weave.js";
+import { setImageDoc, loadImage } from "../images.js";
+import { htmlToDocx } from "../docx.js";
 import * as store from "../store.js";
 
 const ONLINE_MS = 90_000;
@@ -347,11 +348,27 @@ function DocView({ user, doc, role, backend }) {
     setTarget("auto");
   };
 
+  const fileName = (ext) => `${(doc.meta.title || "notes").replace(/[^\p{L}\p{N}]+/gu, "-").replace(/^-|-$/g, "").toLowerCase() || "notes"}.${ext}`;
   const exportMarkdown = () => {
-    const md = toMarkdown(doc, woven, nameOf);
-    const name = (doc.meta.title || "notes").replace(/[^\p{L}\p{N}]+/gu, "-").replace(/^-|-$/g, "").toLowerCase() || "notes";
-    download(`${name}.md`, md);
+    download(fileName("md"), toMarkdown(doc, woven, nameOf));
     toast("Markdown downloaded", { icon: "download" });
+  };
+  /** Word (.docx): the final copy in Edit mode, otherwise the whole woven doc (every tab). */
+  const exportDocx = async () => {
+    const fromDraft = view === "edit" && doc.draft?.html;
+    toast("Making the Word file…", { icon: "download" });
+    try {
+      const blob = await htmlToDocx(fromDraft ? doc.draft.html : weaveToHtml(doc, woven, nameOf), {
+        title: doc.meta.title,
+        author: doc.meta.ownerName || user.name,
+        style,
+        loadImage,
+      });
+      download(fileName("docx"), blob, blob.type);
+      toast(fromDraft ? "Final doc downloaded as Word" : "Woven doc downloaded as Word", { icon: "download" });
+    } catch (e) {
+      toast(e.message || "Couldn't make the Word file", { icon: "triangle-alert", tone: "danger" });
+    }
   };
   const exportPdf = () => {
     if (view === "streams") setView("woven");
@@ -442,6 +459,7 @@ function DocView({ user, doc, role, backend }) {
         { label: "Import into this doc…", hint: "Word, Google Docs, Markdown, text", icon: "file-up", disabled: !canEdit, onSelect: () => setModal("import") },
         { label: "Share…", icon: "user-plus", onSelect: () => setModal("share") },
         { sep: true },
+        { label: "Download Word (.docx)", hint: view === "edit" && doc.draft?.html ? "the final doc" : "the woven doc, every tab", icon: "download", onSelect: exportDocx },
         { label: "Download Markdown", hint: ".md with credits", icon: "download", onSelect: exportMarkdown },
         { label: "Print / save as PDF", hint: view === "edit" ? "the final doc" : "the woven doc", icon: "printer", kbd: "Ctrl P", onSelect: exportPdf },
         { sep: true },
