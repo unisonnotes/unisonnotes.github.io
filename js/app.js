@@ -5,13 +5,18 @@ import { createLocalBackend } from "./backend/local.js";
 import { initStore, saveProfile, watchInvites, acceptInvite } from "./store.js";
 import { Logo, ToastHost, DialogHost, toast } from "./ui/kit.js";
 import { SignIn } from "./ui/signin.js";
+import { Landing } from "./ui/landing.js";
 import { Home } from "./ui/home.js";
 import { DocPage } from "./ui/doc.js";
 
-// Hash routes keep GitHub Pages happy (no server rewrites): #/ and #/d/<docId>
+// Hash routes keep GitHub Pages happy (no server rewrites):
+// #/ (main page, or your docs once signed in), #/about, #/signin, #/d/<docId>
 function parseRoute() {
   const m = /^#\/d\/([^/?]+)/.exec(location.hash);
-  return m ? { name: "doc", docId: decodeURIComponent(m[1]) } : { name: "home" };
+  if (m) return { name: "doc", docId: decodeURIComponent(m[1]) };
+  if (/^#\/signin\b/.test(location.hash)) return { name: "signin" };
+  if (/^#\/about\b/.test(location.hash)) return { name: "about" };
+  return { name: "home" };
 }
 
 function useRoute() {
@@ -50,8 +55,14 @@ function App({ backend }) {
     });
   }, [user?.uid]);
 
+  // Signing in from #/signin lands on your docs.
+  useEffect(() => {
+    if (user && route.name === "signin") location.replace("#/");
+  }, [user, route.name]);
+
   let page;
   if (user === undefined) page = html`<${Loading} />`;
+  else if (route.name === "about" || (!user && route.name === "home")) page = html`<${Landing} signedIn=${!!user} />`;
   else if (!user) page = html`<${SignIn} backend=${backend} />`;
   else if (route.name === "doc") page = html`<${DocPage} key=${route.docId} user=${user} docId=${route.docId} backend=${backend} />`;
   else page = html`<${Home} user=${user} backend=${backend} />`;

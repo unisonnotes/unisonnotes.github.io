@@ -1,4 +1,4 @@
-// Sign-in splash. Composition borrowed from omp's start screen in Tern: a centered
+// Sign-in page. Composition borrowed from omp's start screen in Tern: a centered
 // mark, a single card on a dot grid, a horizon line and a soft glow beneath it.
 import { html, useState, useRef, useEffect } from "./h.js";
 import { Icon } from "./icons.js";
@@ -11,38 +11,6 @@ const GOOGLE = html`<svg width="18" height="18" viewBox="0 0 48 48" aria-hidden=
   <path fill="#4CAF50" d="M24 44c5.2 0 9.9-2 13.4-5.2l-6.2-5.2C29.2 35.1 26.7 36 24 36c-5.2 0-9.6-3.3-11.3-8l-6.5 5C9.5 39.6 16.2 44 24 44z"/>
   <path fill="#1976D2" d="M43.6 20.5H42V20H24v8h11.3c-.8 2.2-2.2 4.2-4.1 5.6l6.2 5.2C37 39.2 44 34 44 24c0-1.3-.1-2.4-.4-3.5z"/>
 </svg>`;
-
-const STREAMS = [
-  { who: "Maya", color: "var(--a1)", lines: ["Krebs cycle → 2 ATP per glucose", "#enzymes control rate"] },
-  { who: "Jon", color: "var(--a2)", lines: ["krebs cycle makes 2 ATP", "ETC is in inner membrane"] },
-  { who: "Priya", color: "var(--a3)", lines: ["Electron transport chain: inner membrane", "Q: why oxygen last?"] },
-];
-
-function Preview() {
-  return html`<div class="signin-preview" aria-hidden="true">
-    <div class="preview-streams">
-      ${STREAMS.map(
-        (s, i) => html`<div class="preview-stream" style=${{ "--who": s.color, "--i": i }}>
-          <div class="preview-who"><i />${s.who}</div>
-          ${s.lines.map((l, j) => html`<div class="preview-note" style=${{ "--j": j }}>${l}</div>`)}
-        </div>`,
-      )}
-    </div>
-    <div class="preview-weave">
-      <svg viewBox="0 0 300 40" preserveAspectRatio="none">
-        <path pathLength="1" d="M50 0 C50 24 150 16 150 40" style="--who: var(--a1)" />
-        <path pathLength="1" d="M150 0 L150 40" style="--who: var(--a2)" />
-        <path pathLength="1" d="M250 0 C250 24 150 16 150 40" style="--who: var(--a3)" />
-      </svg>
-    </div>
-    <div class="preview-doc">
-      <div class="preview-h">Cellular respiration</div>
-      <div class="preview-b"><span>Krebs cycle makes 2 ATP per glucose</span><em>×2</em></div>
-      <div class="preview-b"><span>ETC sits in the inner membrane</span><em>×2</em></div>
-      <div class="preview-b"><span>Why is oxygen the final acceptor?</span><b>solo</b></div>
-    </div>
-  </div>`;
-}
 
 export function SignIn({ backend }) {
   const local = backend.auth.kind === "local";
@@ -80,16 +48,17 @@ export function SignIn({ backend }) {
   return html`<main class="signin">
     <div class="signin-grid" aria-hidden="true" />
     <div class="signin-horizon" aria-hidden="true" />
+    <a class="signin-back" href="#/"><${Icon} name="arrow-left" size=${15} /> Back</a>
     <div class="signin-corner"><${ModeToggle} /></div>
 
     <div class="signin-center">
-      <div class="signin-brand">
+      <a class="signin-brand" href="#/" title="Unison Notes home">
         <${Logo} size=${62} draw />
         <div>
           <h1>Unison<span>Notes</span></h1>
           <p class="mono">everyone writes · one doc</p>
         </div>
-      </div>
+      </a>
 
       <div class="signin-card-wrap">
         <div class="card-meta mono"><span>${local ? "LOCAL MODE" : "SIGN IN"}</span><span>${local ? "data stays in this browser" : "free · no install"}</span></div>
@@ -136,8 +105,6 @@ export function SignIn({ backend }) {
         </section>
         <div class="card-glow" aria-hidden="true" />
       </div>
-
-      <${Preview} />
     </div>
   </main>`;
 }

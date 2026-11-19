@@ -19,6 +19,7 @@ export function AccountMenu({ user, backend, onTheme }) {
       { heading: html`<div class="acct-head"><${Avatar} ...${user} size=${36} /><span><b>${user.name}</b><small>${user.email}</small></span></div>` },
       { sep: true },
       { label: "Appearance…", icon: "palette", onSelect: onTheme },
+      { label: "About Unison", icon: "circle-help", onSelect: () => go("/about") },
       { label: backend.auth.kind === "local" ? "Switch account" : "Sign out", icon: "log-out", onSelect: () => backend.auth.signOut() },
     ]}
   />`;
