@@ -304,7 +304,7 @@ export function WovenPage({ ctx }) {
     );
     pageRef.current.querySelectorAll(".w-sec").forEach((el) => io.observe(el));
     return () => io.disconnect();
-  }, [woven.sections.length]);
+  }, [woven.sections.map((s) => s.id).join()]);
 
   const counts = new Map();
   for (const n of Object.values(doc.notes || {})) counts.set(n.author, (counts.get(n.author) || 0) + 1);
@@ -313,14 +313,15 @@ export function WovenPage({ ctx }) {
   const empty = !woven.sections.length && !woven.unsorted.length;
   const targetSection = woven.sections.find((s) => s.id === ctx.resolvedTarget);
 
+  const tab = ctx.tabs.find((t) => t.id === ctx.activeTab);
   return html`<article class="page" ref=${pageRef}>
     <div class="page-kicker mono">
-      <span>Woven notes</span>
+      ${tab ? html`<span>${doc.meta.title}</span><span>·</span><span>tab ${ctx.tabs.indexOf(tab) + 1} of ${ctx.tabs.length}</span>` : html`<span>Woven notes</span>`}
       <span>·</span>
       <span>${contributors.length} writer${contributors.length === 1 ? "" : "s"}</span>
       ${lastAt > 0 && html`<span>·</span><span>updated ${timeAgo(lastAt, now)}</span>`}
     </div>
-    <h1 class="page-title">${doc.meta.title}</h1>
+    <h1 class="page-title">${tab ? tab.title : doc.meta.title}</h1>
     ${contributors.length > 0 &&
     html`<div class="credits">
       ${contributors.map(
@@ -338,7 +339,7 @@ export function WovenPage({ ctx }) {
       <div class="weave-art" aria-hidden="true">
         <svg viewBox="0 0 120 80"><path pathLength="1" d="M20 6c0 30 40 26 40 60" style="--who:var(--a1)"/><path pathLength="1" d="M60 6v60" style="--who:var(--a2)"/><path pathLength="1" d="M100 6c0 30-40 26-40 60" style="--who:var(--a3)"/></svg>
       </div>
-      <h3>The page is empty, for now</h3>
+      <h3>${tab ? "This tab is empty, for now" : "The page is empty, for now"}</h3>
       <p>${canEdit
         ? html`Start a topic with <code>#Topic</code> in your composer, then write notes. Press <kbd class="kbd">Tab</kbd> to nest a bullet under the one before it. Everyone's notes weave in here as they press Enter.`
         : "Notes appear here as editors write them."}</p>

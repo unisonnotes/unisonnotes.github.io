@@ -5,6 +5,8 @@
 // ───────────── Input parsing ─────────────
 
 const TAG_RE = /(^|\s)#([\p{L}\p{N}][\p{L}\p{N}_-]*)/gu;
+/** Images live in notes as ![alt](img:<id>); the picture itself is stored separately. */
+export const IMAGE_RE = /!\[([^\]]*)\]\(img:([\w-]+)\)/g;
 
 export const slug = (s) =>
   s
@@ -74,7 +76,13 @@ function stem(w) {
 export function tokenize(text) {
   const words = new Set();
   const nums = new Set();
-  const cleaned = text.toLowerCase().replace(TAG_RE, " ").replace(/[^\p{L}\p{N}$%.,:/'’-]+/gu, " ");
+  const cleaned = text
+    .toLowerCase()
+    .replace(IMAGE_RE, " ")
+    .replace(/\[([^\]]*)\]\([^)]*\)/g, "$1")
+    .replace(/https?:\/\/\S+/g, " ")
+    .replace(TAG_RE, " ")
+    .replace(/[^\p{L}\p{N}$%.,:/'’-]+/gu, " ");
   for (let raw of cleaned.split(/\s+/)) {
     raw = raw.replace(/^[.,:/'’-]+|[.,:/'’-]+$/g, "");
     if (!raw) continue;
@@ -151,15 +159,39 @@ export function orderedSections(sections) {
   return out;
 }
 
+/** Tabs in display order (same tree rules as sections): [{id, title, depth, parentId, ...}]. */
+export const orderedTabs = (tabs) => orderedSections(tabs);
+
+/**
+ * Which tab each section lives in. Topics carry tabId; subtopics follow their topic.
+ * Topics without one (made before the doc had tabs) belong to the first tab.
+ */
+export function sectionTabs(sections, tabs) {
+  const out = new Map();
+  const firstTab = orderedTabs(tabs)[0]?.id ?? null;
+  const ordered = orderedSections(sections);
+  const byId = new Map(ordered.map((s) => [s.id, s]));
+  for (const s of ordered) {
+    let root = s;
+    while (root.parentId && byId.has(root.parentId)) root = byId.get(root.parentId);
+    const t = root.tabId && tabs?.[root.tabId] ? root.tabId : firstTab;
+    out.set(s.id, t);
+  }
+  return out;
+}
+
 /**
  * The newest section; notes go here unless the writer pins another one. Sections
  * created together (template, agenda) share a timestamp, so the first of that batch wins.
  * Sections spawned from hashtags don't count: they collect tagged notes, not the flow.
+ * With `tabs` and `tabId`, only sections in that tab count.
  */
-export function latestSection(sections) {
+export function latestSection(sections, tabs = null, tabId = undefined) {
+  const tabOf = tabId !== undefined ? sectionTabs(sections, tabs) : null;
   let best = null;
   for (const s of orderedSections(sections)) {
     if (s.tag) continue;
+    if (tabOf && tabOf.get(s.id) !== tabId) continue;
     if (!best || (s.createdAt ?? 0) > (best.createdAt ?? 0)) best = s;
   }
   return best;
@@ -229,12 +261,8 @@ function groupDuplicates(notes, merges) {
   };
   const union = (a, b) => parent.set(find(a), find(b));
 
-  for (let i = 0; i < notes.length; i++) {
-    for (let j = i + 1; j < notes.length; j++) {
-      const a = notes[i];
-      const b = notes[j];
-      if (wordsMatch(a.tokens, b.tokens) && !numberConflict(a.tokens, b.tokens)) union(a.id, b.id);
-    }
+  for (const [a, b] of candidatePairs(notes)) {
+    if (wordsMatch(a.tokens, b.tokens) && !numberConflict(a.tokens, b.tokens)) union(a.id, b.id);
   }
   for (const n of notes) {
     const target = merges[n.id];
@@ -250,17 +278,40 @@ function groupDuplicates(notes, merges) {
   return [...groups.values()];
 }
 
-/** Similar notes anywhere in the doc whose numbers or dates disagree. */
+/**
+ * Pairs of notes that share at least one word (i < j), found through an inverted
+ * index so big docs don't compare every note with every other note.
+ */
+function candidatePairs(notes) {
+  const byWord = new Map();
+  notes.forEach((n, i) => {
+    for (const w of n.tokens.words) {
+      if (!byWord.has(w)) byWord.set(w, []);
+      byWord.get(w).push(i);
+    }
+  });
+  const seen = new Set();
+  const pairs = [];
+  for (const list of byWord.values()) {
+    for (let x = 0; x < list.length; x++) {
+      for (let y = x + 1; y < list.length; y++) {
+        const key = list[x] * 1e6 + list[y];
+        if (seen.has(key)) continue;
+        seen.add(key);
+        pairs.push([notes[list[x]], notes[list[y]]]);
+      }
+    }
+  }
+  return pairs;
+}
+
+/** Similar notes anywhere in the doc whose numbers or dates disagree. Only notes with numbers can clash. */
 function findConflicts(notes) {
   const out = [];
-  for (let i = 0; i < notes.length; i++) {
-    for (let j = i + 1; j < notes.length; j++) {
-      const a = notes[i];
-      const b = notes[j];
-      if (!wordsMatch(a.tokens, b.tokens)) continue;
-      const clash = numberConflict(a.tokens, b.tokens);
-      if (clash) out.push({ noteA: a.id, noteB: b.id, numsA: clash.a, numsB: clash.b });
-    }
+  for (const [a, b] of candidatePairs(notes.filter((n) => n.tokens.nums.size))) {
+    if (!wordsMatch(a.tokens, b.tokens)) continue;
+    const clash = numberConflict(a.tokens, b.tokens);
+    if (clash) out.push({ noteA: a.id, noteB: b.id, numsA: clash.a, numsB: clash.b });
   }
   return out;
 }
@@ -367,20 +418,44 @@ export function weave(doc) {
     return items.sort((a, b) => a.createdAt - b.createdAt);
   };
 
+  const tabOf = sectionTabs(doc.sections, doc.tabs);
+  const notesBySection = new Map();
+  for (const n of notes) {
+    const sid = sectionOfNote.get(n.id);
+    if (!notesBySection.has(sid)) notesBySection.set(sid, []);
+    notesBySection.get(sid).push(n);
+  }
   const woven = sections.map((s) => {
     const items = buildItems(bySection.get(s.id), 0);
-    const list = notes.filter((n) => sectionOfNote.get(n.id) === s.id);
-    const times = list.map((n) => n.createdAt ?? 0);
+    const list = notesBySection.get(s.id) || [];
+    let firstAt = null;
+    let lastAt = null;
+    for (const n of list) {
+      const t = n.createdAt ?? 0;
+      if (firstAt === null || t < firstAt) firstAt = t;
+      if (lastAt === null || t > lastAt) lastAt = t;
+    }
     return {
       ...s,
+      tab: tabOf.get(s.id) ?? null,
       items,
       noteCount: list.length,
       authors: [...new Set(list.map((n) => n.author))],
-      firstAt: times.length ? Math.min(...times) : null,
-      lastAt: times.length ? Math.max(...times) : null,
+      firstAt,
+      lastAt,
       heat: 0,
     };
   });
+  // Number topics within their own tab (01, 01.1, …).
+  const numbers = new Map();
+  const counters = new Map();
+  for (const s of woven) {
+    const key = s.parentId && numbers.has(s.parentId) ? s.parentId : `tab:${s.tab}`;
+    const n = (counters.get(key) || 0) + 1;
+    counters.set(key, n);
+    s.number = key.startsWith("tab:") ? String(n).padStart(2, "0") : `${numbers.get(s.parentId)}.${n}`;
+    numbers.set(s.id, s.number);
+  }
 
   // Gap heatmap: leaf sections well below the average number of distinct top-level
   // points glow. A section with subtopics is judged by its subtopics instead.
@@ -474,6 +549,155 @@ export function parseOutline(raw) {
   return out;
 }
 
+const MAX_NOTE = 3800;
+const plainText = (s) => s.replace(/!\[[^\]]*\]\([^)]*\)/g, "").replace(/\[([^\]]*)\]\([^)]*\)/g, "$1").replace(/(\*\*|\+\+|~~|==|`)/g, "").replace(/(^|\s)[*_](\S)/g, "$1$2").replace(/(\S)[*_](\s|$)/g, "$1$2");
+
+/**
+ * Work out a document's structure from formatting, the way a reader would. Most docs
+ * mark only a few real headings; the rest is implied: a short line right before a
+ * bulleted list is a label for it, the first line after a page/section break starts a
+ * new part, and noticeably bigger text is a heading.
+ *
+ * blocks: [{type: "p"|"li"|"img", text, depth?, heading? (1–6 from a style),
+ *           title? (Title style), size? (pt), bold? (whole line), sectionStart?}]
+ * Returns {title, items}: items are {kind: "section", text, rank} (lower rank = higher
+ * level) or {kind: "note", text, depth}.
+ */
+export function inferOutline(blocks) {
+  const real = blocks.filter((b) => b.type === "img" || b.type === "tab" || (b.text && b.text.trim()));
+  const weight = new Map();
+  for (const b of real) if (b.size && b.type !== "img") weight.set(b.size, (weight.get(b.size) || 0) + b.text.length);
+  const body = [...weight].sort((a, b) => b[1] - a[1])[0]?.[0] || null;
+
+  // A big line (or Title) at the very top is the document's title.
+  let title = null;
+  let titleTab = false;
+  for (let i = 0, seen = 0; i < real.length && seen < 3; i++) {
+    const b = real[i];
+    if (b.type === "tab") continue;
+    seen++;
+    if (b.type === "p" && plainText(b.text).trim().length <= 120 && (b.title || (body && b.size >= body * 1.8))) {
+      title = plainText(b.text).trim();
+      titleTab = real.slice(0, i).some((x) => x.type === "tab");
+      real.splice(i, 1);
+      break;
+    }
+  }
+
+  const nextReal = (i) => real[i + 1];
+  const rankOf = (b, i) => {
+    if (b.type !== "p") return null;
+    const t = plainText(b.text).trim();
+    if (!t || t.length > 120) return null;
+    if (b.heading != null) return 20 + b.heading;
+    if (b.title) return 10;
+    const big = body && b.size && b.size >= body * 1.25;
+    let r = null;
+    if (big) r = b.size >= body * 1.8 ? 5 : 15;
+    if (b.sectionStart && t.length <= 100) r = Math.min(r ?? 99, 10);
+    if (r != null) return r;
+    const sentence = /[.!?]["”')]?$/.test(t) && t.split(/\s+/).length > 6;
+    const next = nextReal(i);
+    if (t.length <= 100 && !sentence && next && (next.type === "li" || next.type === "img")) return 40;
+    if (b.bold && t.length <= 80 && !sentence) return 40;
+    return null;
+  };
+
+  let items = [];
+  real.forEach((b, i) => {
+    if (b.type === "tab") {
+      items.push({ kind: "tab", text: null });
+      return;
+    }
+    const rank = rankOf(b, i);
+    if (rank != null) {
+      items.push({ kind: "section", text: plainText(b.text).trim().replace(/:$/, "").slice(0, 200), rank });
+      return;
+    }
+    const depth = b.type === "li" ? Math.min(b.depth || 0, MAX_DEPTH) : 0;
+    const text = b.text.trim();
+    if (text.length <= MAX_NOTE) items.push({ kind: "note", text, depth });
+    else
+      for (const part of text.match(new RegExp(`[\\s\\S]{1,${MAX_NOTE}}(?:[.!?](?=\\s)|$)|[\\s\\S]{1,${MAX_NOTE}}`, "g")) || [text])
+        if (part.trim()) items.push({ kind: "note", text: part.trim(), depth });
+  });
+
+  // A size-based heading used only once (a cover line like "The Brain") folds into the next tier down.
+  const tiers = [...new Set(items.filter((it) => it.kind === "section").map((it) => it.rank))].sort((a, b) => a - b);
+  for (let k = 0; k < tiers.length - 1; k++) {
+    if (tiers[k] !== 5 && tiers[k] !== 15) continue;
+    const at = items.filter((it) => it.kind === "section" && it.rank === tiers[k]);
+    if (at.length === 1) at[0].rank = tiers[k + 1];
+  }
+
+  if (items.some((it) => it.kind === "tab")) items = shapeTabs(items, titleTab);
+  return { title, items };
+}
+
+/**
+ * Tabs from another app: name each by its first line, drop tabs with no notes (cover
+ * pages and title-only dividers), and give notes that come before any heading in a tab
+ * a topic named after the tab.
+ */
+function shapeTabs(items, titleTab) {
+  const groups = [];
+  for (const it of items) {
+    if (it.kind === "tab" || !groups.length) groups.push({ head: it.kind === "tab" ? it : null, body: [] });
+    if (it.kind !== "tab") groups[groups.length - 1].body.push(it);
+  }
+  const top = Math.min(...items.filter((i) => i.kind === "section").map((i) => i.rank), 10);
+  const out = [];
+  groups.forEach((g, gi) => {
+    if (!g.body.some((i) => i.kind === "note")) return;
+    if (!g.head) {
+      out.push(...g.body);
+      return;
+    }
+    const first = g.body[0];
+    let name = gi === 0 && titleTab ? "Cover" : first.kind === "section" ? first.text : plainText(first.text).replace(/\s+/g, " ").trim();
+    if (name.length > 60) name = name.slice(0, 57).trimEnd() + "…";
+    out.push({ kind: "tab", text: name });
+    let body = g.body;
+    // A tab's first line usually repeats its name; when it only wraps other topics, drop it.
+    if (first.kind === "section" && body[1]?.kind === "section" && !body.slice(1).some((i) => i.kind === "section" && i.rank <= first.rank)) body = body.slice(1);
+    else if (first.kind !== "section") out.push({ kind: "section", text: name, rank: top });
+    out.push(...body);
+  });
+  return out;
+}
+
+/**
+ * Turn an outline into a tree plan Unison can store: each section gets a parent
+ * section (by rank, at most `maxDepth` levels deep), each note its section and
+ * parent note. Indices refer to positions in `items`.
+ */
+export function planOutline(items, maxDepth = 2) {
+  const stack = [];
+  let notes = [];
+  let tab = null;
+  return items.map((it, idx) => {
+    if (it.kind === "tab") {
+      stack.length = 0;
+      notes = [];
+      tab = idx;
+      return { ...it };
+    }
+    if (it.kind === "section") {
+      const rank = it.rank ?? it.level ?? 0;
+      while (stack.length && stack[stack.length - 1].rank >= rank) stack.pop();
+      while (stack.length && stack[stack.length - 1].depth >= maxDepth) stack.pop();
+      const parent = stack[stack.length - 1] || null;
+      const depth = parent ? parent.depth + 1 : 0;
+      stack.push({ rank, idx, depth });
+      notes = [];
+      return { ...it, parent: parent ? parent.idx : null, depth, tab };
+    }
+    const d = Math.min(it.depth || 0, notes.length);
+    notes = [...notes.slice(0, d), idx];
+    return { ...it, depth: d, tab, section: stack.length ? stack[stack.length - 1].idx : null, noteParent: d > 0 ? notes[d - 1] : null };
+  });
+}
+
 // ───────────── Export ─────────────
 
 const fmtDate = (ms) =>
@@ -504,13 +728,17 @@ export function toMarkdown(doc, woven, nameOf) {
     for (const child of item.children) line += "\n" + bullet(child, depth + 1);
     return line;
   };
-  for (const s of woven.sections) {
-    const when = s.firstAt ? ` · ${fmtTime(s.firstAt)}` : "";
-    out.push(`${"#".repeat(Math.min(2 + (s.depth || 0), 6))} ${s.title}`, "");
-    if (s.firstAt) out.push(`<sub>${s.noteCount} notes${when}</sub>`, "");
-    if (!s.items.length && !woven.sections.some((x) => x.parentId === s.id)) out.push("_No notes._");
-    for (const item of s.items) out.push(bullet(item));
-    out.push("");
+  for (const { tab, sections } of byTab(doc, woven)) {
+    const shift = tab ? 1 : 0;
+    if (tab) out.push(`## ${tab.title}`, "");
+    for (const s of sections) {
+      const when = s.firstAt ? ` · ${fmtTime(s.firstAt)}` : "";
+      out.push(`${"#".repeat(Math.min(2 + shift + (s.depth || 0), 6))} ${s.title}`, "");
+      if (s.firstAt) out.push(`<sub>${s.noteCount} notes${when}</sub>`, "");
+      if (!s.items.length && !woven.sections.some((x) => x.parentId === s.id)) out.push("_No notes._");
+      for (const item of s.items) out.push(bullet(item));
+      out.push("");
+    }
   }
   if (woven.unsorted.length) {
     out.push("## Unsorted", "");
@@ -526,19 +754,27 @@ const findText = (doc, noteId) => (doc.notes?.[noteId]?.text || "").replace(/\n+
 
 const escapeHtml = (s) => s.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 
-/** Note text with light Markdown (**b**, *i*, _i_, ~~s~~, ==mark==, `code`, links) as safe HTML. */
+/**
+ * Note text with light Markdown as safe HTML: **b**, *i*, _i_, ++u++, ~~s~~, ==mark==,
+ * `code`, [label](url), bare links and ![alt](img:id) images (resolved later via data-img).
+ */
 export function inlineHtml(text) {
-  const codes = [];
-  let s = escapeHtml(text).replace(/`([^`\n]+)`/g, (_, c) => `\u0000${codes.push(c) - 1}\u0000`);
+  const held = [];
+  const hold = (html) => `\u0000${held.push(html) - 1}\u0000`;
+  let s = escapeHtml(text)
+    .replace(/`([^`\n]+)`/g, (_, c) => hold(`<code>${c}</code>`))
+    .replace(/!\[([^\]]*)\]\(img:([\w-]+)\)/g, (_, alt, id) => hold(`<img data-img="${id}" alt="${alt}">`))
+    .replace(/\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)/g, (_, label, url) => hold(`<a href="${url}">${label}</a>`))
+    .replace(/https?:\/\/[^\s<>"')\]]+/g, (url) => hold(`<a href="${url}">${url.replace(/^https?:\/\//, "")}</a>`));
   s = s
     .replace(/\*\*(?=\S)(.+?)(?<=\S)\*\*/g, "<strong>$1</strong>")
+    .replace(/\+\+(?=\S)(.+?)(?<=\S)\+\+/g, "<u>$1</u>")
     .replace(/~~(?=\S)(.+?)(?<=\S)~~/g, "<s>$1</s>")
     .replace(/==(?=\S)(.+?)(?<=\S)==/g, "<mark>$1</mark>")
     .replace(/(^|[^\p{L}\p{N}*])\*(?=\S)([^*\n]+?)(?<=\S)\*(?![\p{L}\p{N}*])/gu, "$1<em>$2</em>")
     .replace(/(^|[^\p{L}\p{N}_])_(?=\S)([^_\n]+?)(?<=\S)_(?![\p{L}\p{N}_])/gu, "$1<em>$2</em>")
-    .replace(/https?:\/\/[^\s<>"')\]]+/g, (url) => `<a href="${url}">${url.replace(/^https?:\/\//, "")}</a>`)
     .replace(/\n/g, "<br>");
-  return s.replace(/\u0000(\d+)\u0000/g, (_, i) => `<code>${codes[i]}</code>`);
+  return s.replace(/\u0000(\d+)\u0000/g, (_, i) => held[i]);
 }
 
 /** The woven doc as plain document HTML: title, topic headings, nested bullet lists. */
@@ -550,10 +786,21 @@ export function weaveToHtml(doc, woven, nameOf) {
     items.length ? `<ul>${items.map((it) => `<li>${inlineHtml(it.rep.text)}${list(it.children)}</li>`).join("")}</ul>` : "";
   const out = [`<h1>${escapeHtml(doc.meta.title)}</h1>`];
   if (names.length) out.push(`<p class="doc-byline">Notes by ${names.join(", ")}</p>`);
-  for (const s of woven.sections) {
-    const h = `h${Math.min(2 + (s.depth || 0), 4)}`;
-    out.push(`<${h}>${escapeHtml(s.title)}</${h}>`, list(s.items));
+  for (const { tab, sections } of byTab(doc, woven)) {
+    const shift = tab ? 1 : 0;
+    if (tab) out.push(`<h2 class="tab-title">${escapeHtml(tab.title)}</h2>`);
+    for (const s of sections) {
+      const h = `h${Math.min(2 + shift + (s.depth || 0), 4)}`;
+      out.push(`<${h}>${escapeHtml(s.title)}</${h}>`, list(s.items));
+    }
   }
   if (woven.unsorted.length) out.push("<h2>Other notes</h2>", list(woven.unsorted));
   return out.filter(Boolean).join("\n");
+}
+
+/** Woven sections grouped by tab, in tab order. Docs without tabs give one group with tab null. */
+export function byTab(doc, woven) {
+  const tabs = orderedTabs(doc.tabs);
+  if (!tabs.length) return [{ tab: null, sections: woven.sections }];
+  return tabs.map((tab) => ({ tab, sections: woven.sections.filter((s) => s.tab === tab.id) }));
 }

@@ -8,14 +8,15 @@ import { Menu, toast, ask, timeAgo, Kbd } from "./kit.js";
 import { FONTS } from "./format.js";
 import { weaveToHtml, inlineHtml } from "../weave.js";
 import * as store from "../store.js";
+import { loadImage } from "../images.js";
 
 const LOCK_MS = 45_000;
 const SAVE_MS = 700;
 
 // ───────────── Sanitizing (draft HTML is shared between members) ─────────────
 
-const TAGS = new Set("P H1 H2 H3 H4 UL OL LI B STRONG I EM U S STRIKE DEL MARK SPAN A BR BLOCKQUOTE CODE PRE SUB SUP DIV HR FONT".split(" "));
-const DROP = new Set("SCRIPT STYLE IFRAME OBJECT EMBED TEMPLATE SVG MATH LINK META NOSCRIPT FORM INPUT BUTTON TEXTAREA SELECT IMG VIDEO AUDIO".split(" "));
+const TAGS = new Set("P H1 H2 H3 H4 UL OL LI B STRONG I EM U S STRIKE DEL MARK SPAN A BR BLOCKQUOTE CODE PRE SUB SUP DIV HR FONT IMG".split(" "));
+const DROP = new Set("SCRIPT STYLE IFRAME OBJECT EMBED TEMPLATE SVG MATH LINK META NOSCRIPT FORM INPUT BUTTON TEXTAREA SELECT VIDEO AUDIO".split(" "));
 const STYLES = ["font-family", "font-size", "font-weight", "font-style", "text-decoration-line", "text-decoration", "color", "background-color", "text-align", "margin-left", "padding-left"];
 
 export function sanitize(dirty) {
@@ -31,6 +32,10 @@ export function sanitize(dirty) {
         el.remove();
         continue;
       }
+      if (el.tagName === "IMG" && !/^[\w-]+$/.test(el.getAttribute("data-img") || "")) {
+        el.remove(); // only pictures stored with the doc; never outside URLs
+        continue;
+      }
       walk(el);
       if (!TAGS.has(el.tagName)) {
         el.replaceWith(...el.childNodes);
@@ -43,9 +48,14 @@ export function sanitize(dirty) {
       }
       const href = el.tagName === "A" ? el.getAttribute("href") : null;
       const cls = el.getAttribute("class") === "doc-byline" ? "doc-byline" : null;
+      const img = el.tagName === "IMG" ? [el.getAttribute("data-img"), el.getAttribute("alt") || ""] : null;
       for (const a of [...el.attributes]) el.removeAttribute(a.name);
       if (keep.length) el.setAttribute("style", keep.join("; "));
       if (cls) el.setAttribute("class", cls);
+      if (img) {
+        el.setAttribute("data-img", img[0]);
+        el.setAttribute("alt", img[1]);
+      }
       if (href && /^(https?:|mailto:)/i.test(href.trim())) {
         el.setAttribute("href", href.trim());
         el.setAttribute("target", "_blank");
@@ -55,6 +65,15 @@ export function sanitize(dirty) {
   };
   walk(doc.body);
   return doc.body.innerHTML;
+}
+
+/** Show stored pictures: sanitized HTML keeps only data-img; fill in the image data. */
+function hydrate(root) {
+  for (const img of root?.querySelectorAll("img[data-img]:not([src])") || []) {
+    loadImage(img.dataset.img).then((v) => {
+      if (v) img.src = v.data;
+    });
+  }
 }
 
 // ───────────── Toolbar bits ─────────────
@@ -98,7 +117,7 @@ function Swatches({ colors, onPick, label }) {
 // ───────────── Editor ─────────────
 
 export function EditMode({ ctx }) {
-  const { doc, docId, user, canEdit, woven, nameOf, now } = ctx;
+  const { doc, docId, user, canEdit, fullWoven: woven, nameOf, now } = ctx;
   const draft = doc.draft;
   const editorRef = useRef(null);
   const rangeRef = useRef(null);
@@ -126,6 +145,7 @@ export function EditMode({ ctx }) {
     const typing = document.activeElement === el && Date.now() - lastInput.current < 4000;
     if (typing && !lockedByOther) return;
     el.innerHTML = sanitize(incoming);
+    hydrate(el);
     lastSaved.current = incoming;
   }, [draft?.html]);
 
@@ -252,13 +272,17 @@ export function EditMode({ ctx }) {
     const el = editorRef.current;
     const body = weaveToHtml(doc, woven, nameOf);
     store.saveDraft(docId, user, sanitize(body), { basedOn: newest }).then(() => toast("Final doc created from the woven notes", { icon: "file-pen-line" }));
-    if (el) el.innerHTML = body;
+    if (el) {
+      el.innerHTML = body;
+      hydrate(el);
+    }
   };
   const rebuild = async () => {
     if (!(await ask({ title: "Rebuild from the notes?", body: "This replaces the final doc with a fresh copy of the woven notes. Edits made here will be lost.", confirm: "Rebuild", danger: true, icon: "rotate-ccw" })))
       return;
     const body = sanitize(weaveToHtml(doc, woven, nameOf));
     editorRef.current.innerHTML = body;
+    hydrate(editorRef.current);
     lastSaved.current = body;
     store.saveDraft(docId, user, body, { basedOn: newest });
   };
@@ -278,6 +302,7 @@ export function EditMode({ ctx }) {
       block += `<h3>${sid ? inlineHtml(doc.sections[sid]?.title || "") : "Other notes"}</h3><ul>${notes.map((n) => `<li>${inlineHtml(n.text)}</li>`).join("")}</ul>`;
     }
     editorRef.current.insertAdjacentHTML("beforeend", sanitize(block));
+    hydrate(editorRef.current);
     save({ basedOn: newest });
     toast(`Added ${fresh.length} new notes at the end`, { icon: "plus" });
   };

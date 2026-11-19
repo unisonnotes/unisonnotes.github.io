@@ -6,8 +6,8 @@ import { Logo, Avatar, Menu, Modal, toast, ask, timeAgo, useNow, go } from "./ki
 import { ModeToggle, ThemePicker } from "./theme-picker.js";
 import { TEMPLATES } from "../templates.js";
 import { agendaToSections } from "../weave.js";
-import { watchMyDocs, watchDocMeta, createDoc, renameDoc, deleteDoc, leaveDoc, forgetDoc, importOutline } from "../store.js";
-import { ImportModal } from "./import.js";
+import { watchMyDocs, watchDocMeta, createDoc, renameDoc, deleteDoc, leaveDoc, forgetDoc, setStyle } from "../store.js";
+import { ImportModal, importInto } from "./import.js";
 
 export function AccountMenu({ user, backend, onTheme }) {
   return html`<${Menu}
@@ -371,9 +371,11 @@ export function Home({ user, backend }) {
     <${ImportModal}
       open=${template?.id === "import"}
       onClose=${() => setTemplate(null)}
-      onImport=${async ({ title, items }) => {
-        const id = await createDoc(user, { title, sections: [] });
-        await importOutline(id, user, items);
+      onImport=${async (data) => {
+        const id = await createDoc(user, { title: data.title, sections: [] });
+        const style = Object.fromEntries(Object.entries(data.style || {}).filter(([, v]) => v != null));
+        if (Object.keys(style).length) await setStyle(id, style);
+        await importInto(id, user, data);
         setTemplate(null);
         go(`/d/${id}`);
       }}

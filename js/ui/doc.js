@@ -12,9 +12,10 @@ import { WovenPage } from "./woven.js";
 import { StreamPanel, StreamsView } from "./stream.js";
 import { Tour, TOUR_KEY } from "./tour.js";
 import { EditMode } from "./editor.js";
-import { ImportModal } from "./import.js";
+import { ImportModal, importInto } from "./import.js";
 import { FONTS, SPACINGS, DEFAULT_STYLE, fontCss, styleVars } from "./format.js";
-import { weave, tagsNeedingSections, tagTitle, nextOrder, latestSection, toMarkdown, agendaToSections } from "../weave.js";
+import { weave, tagsNeedingSections, tagTitle, nextOrder, latestSection, orderedTabs, toMarkdown, agendaToSections } from "../weave.js";
+import { setImageDoc } from "../images.js";
 import * as store from "../store.js";
 
 const ONLINE_MS = 90_000;
@@ -188,9 +189,24 @@ function DocView({ user, doc, role, backend }) {
     store.touchDoc(user.uid, docId, role).catch(() => {});
   }, [docId]);
 
-  const woven = useMemo(() => weave(doc), [doc.sections, doc.notes, doc.merges]);
-  const latest = useMemo(() => latestSection(doc.sections), [doc.sections]);
+  const woven = useMemo(() => weave(doc), [doc.sections, doc.notes, doc.merges, doc.tabs]);
+
+  // Tabs: separate pages of one doc, like Google Docs. Docs without tabs show one page.
+  const tabs = useMemo(() => orderedTabs(doc.tabs), [doc.tabs]);
+  const [tabPick, setTabPick] = useState(() => localStorage.getItem(`unison.doc.tab.${docId}`));
+  const activeTab = tabs.find((t) => t.id === tabPick)?.id ?? tabs[0]?.id ?? null;
+  const openTab = (id) => {
+    setTabPick(id);
+    localStorage.setItem(`unison.doc.tab.${docId}`, id);
+    setTarget("auto");
+    if (view === "streams") setView("woven");
+    document.querySelector(".canvas")?.scrollTo({ top: 0 });
+  };
+  const tabOfSection = useMemo(() => new Map(woven.sections.map((s) => [s.id, s.tab])), [woven]);
+  const tabWoven = useMemo(() => (tabs.length ? { ...woven, sections: woven.sections.filter((s) => s.tab === activeTab) } : woven), [woven, tabs, activeTab]);
+  const latest = useMemo(() => latestSection(doc.sections, doc.tabs, tabs.length ? activeTab : undefined), [doc.sections, doc.tabs, activeTab]);
   const resolvedTarget = target === "auto" ? latest?.id || null : target === "unsorted" ? null : doc.sections?.[target] ? target : latest?.id || null;
+  setImageDoc(docId); // before children render, so their pictures load from this doc
 
   // Presence: announce ourselves and which section we're writing into.
   const presenceRef = useRef(null);
@@ -278,9 +294,15 @@ function DocView({ user, doc, role, backend }) {
     const attempt = () => !run() && --tries > 0 && setTimeout(attempt, 50);
     setTimeout(attempt, 30);
   };
-  const scrollToSection = (sid) => reveal("woven", sid ? `sec-${sid}` : "sec-unsorted", { block: "start" });
+  const scrollToSection = (sid) => {
+    const tab = sid && tabOfSection.get(sid);
+    if (tab && tab !== activeTab) openTab(tab);
+    reveal("woven", sid ? `sec-${sid}` : "sec-unsorted", { block: "start" });
+  };
   const showInWeave = (noteId) => {
     const item = woven.groupOfNote.get(noteId);
+    const tab = tabOfSection.get(woven.sectionOfNote.get(noteId));
+    if (tab && tab !== activeTab) openTab(tab);
     if (item) reveal("woven", `pt-${item.id}`);
   };
   const showInStream = (noteId) => reveal("streams", `sn-${noteId}`);
@@ -288,21 +310,15 @@ function DocView({ user, doc, role, backend }) {
 
   const cycle = useRef({ conflict: -1, gap: -1 });
   const jumpTo = (kind) => {
-    const ids =
+    const targets =
       kind === "conflict"
-        ? [...woven.sections, { id: null, items: woven.unsorted }].flatMap((s) => s.items.filter((i) => i.conflicts.length).map((i) => i.id))
-        : woven.sections.filter((s) => s.heat >= 0.5).map((s) => `sec-${s.id}`);
-    if (!ids.length) return;
-    if (view !== "woven") setView("woven");
-    cycle.current[kind] = (cycle.current[kind] + 1) % ids.length;
-    const id = ids[cycle.current[kind]];
-    setTimeout(() => {
-      const el = document.getElementById(kind === "conflict" ? `pt-${id}` : id);
-      el?.scrollIntoView({ behavior: "smooth", block: "center" });
-      el?.classList.remove("is-flash");
-      void el?.offsetWidth;
-      el?.classList.add("is-flash");
-    }, 30);
+        ? [...woven.sections, { id: null, tab: activeTab, items: woven.unsorted }].flatMap((s) => s.items.filter((i) => i.conflicts.length).map((i) => [`pt-${i.id}`, s.tab]))
+        : woven.sections.filter((s) => s.heat >= 0.5).map((s) => [`sec-${s.id}`, s.tab]);
+    if (!targets.length) return;
+    cycle.current[kind] = (cycle.current[kind] + 1) % targets.length;
+    const [id, tab] = targets[cycle.current[kind]];
+    if (tab && tab !== activeTab) openTab(tab);
+    reveal("woven", id);
   };
 
   // The composer lives in the side panel; open it first if it's closed.
@@ -315,9 +331,20 @@ function DocView({ user, doc, role, backend }) {
   const startTopic = (level) => withComposer((api) => api.startTopic(level));
 
   const addAgenda = async (titles) => {
-    await store.addSections(docId, user, titles, nextOrder(doc.sections));
+    await store.addSections(docId, user, titles, nextOrder(doc.sections), activeTab);
     setModal(null);
     toast(`Added ${titles.length} topics`, { icon: "list-tree" });
+  };
+
+  /** New tab. A doc without tabs first gets “Tab 1” holding everything it already has. */
+  const addTab = async (parentId = null) => {
+    if (!canEdit) return;
+    const title = await ask({ title: parentId ? "New sub-tab" : "New tab", input: { value: "", placeholder: "Tab name" }, confirm: "Add tab", icon: "panel-top" });
+    if (!title) return;
+    if (!tabs.length && Object.keys(doc.sections || {}).length) await store.addTab(docId, user, "Tab 1", 0);
+    const id = await store.addTab(docId, user, title, nextOrder(doc.tabs || {}, parentId) + (tabs.length ? 0 : 1), parentId);
+    openTab(id);
+    setTarget("auto");
   };
 
   const exportMarkdown = () => {
@@ -358,7 +385,11 @@ function DocView({ user, doc, role, backend }) {
     role,
     canEdit,
     isOwner,
-    woven,
+    woven: tabWoven,
+    fullWoven: woven,
+    tabs,
+    activeTab,
+    setActiveTab: openTab,
     people,
     nameOf,
     online,
@@ -455,6 +486,8 @@ function DocView({ user, doc, role, backend }) {
         { label: "Topic", hint: "or type #Topic", icon: "hash", disabled: !canEdit, onSelect: () => startTopic(0) },
         { label: "Subtopic", hint: "or type ##Subtopic", icon: "corner-down-left", disabled: !canEdit || !resolvedTarget, onSelect: () => startTopic(1) },
         { label: "Topics from agenda…", icon: "clipboard-list", disabled: !canEdit, onSelect: () => setModal("agenda") },
+        { sep: true },
+        { label: "Tab", hint: "a separate page in this doc", icon: "panel-top", disabled: !canEdit, onSelect: () => addTab() },
       ],
     },
     {
@@ -559,7 +592,7 @@ function DocView({ user, doc, role, backend }) {
     </div>`}
 
     <div class="doc-body">
-      ${showSpine && html`<${Spine} ctx=${ctx} onAddSection=${() => startTopic(0)} onAgenda=${() => setModal("agenda")} />`}
+      ${showSpine && html`<${Spine} ctx=${ctx} onAddSection=${() => startTopic(0)} onAgenda=${() => setModal("agenda")} onAddTab=${addTab} />`}
       <main class="canvas" style=${styleVars(style)}>
         ${view === "edit" ? html`<${EditMode} ctx=${ctx} />` : view === "streams" ? html`<${StreamsView} ctx=${ctx} />` : html`<${WovenPage} ctx=${ctx} />`}
       </main>
@@ -574,11 +607,11 @@ function DocView({ user, doc, role, backend }) {
       open=${modal === "import"}
       onClose=${() => setModal(null)}
       mode="append"
-      onImport=${async ({ items }) => {
-        const n = await store.importOutline(docId, user, items, { sections: doc.sections, contextSection: resolvedTarget });
+      onImport=${async (data) => {
+        const res = await importInto(docId, user, data, { sections: doc.sections, tabs: doc.tabs, contextSection: resolvedTarget, tabId: activeTab });
         setModal(null);
         setTarget("auto");
-        toast(`Imported ${n} items`, { icon: "file-up" });
+        toast(`Imported ${res.notes} notes${res.tabs ? ` in ${res.tabs} tabs` : ""}`, { icon: "file-up" });
       }}
     />
     ${tour &&

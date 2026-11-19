@@ -1,7 +1,7 @@
 // Domain operations over the backend adapter. Paths follow the data model in
 // README.md; database.rules.json enforces who may write each of them.
 
-import { headingParent, nextOrder, extractTags } from "./weave.js";
+import { headingParent, nextOrder, extractTags, planOutline } from "./weave.js";
 
 let db = null;
 export function initStore(backend) {
@@ -65,7 +65,7 @@ export const touchDoc = (uid, docId, role) =>
 export const renameDoc = (docId, title) => db.set(`docs/${docId}/meta/title`, title.trim() || "Untitled notes");
 
 export function deleteDoc(uid, doc) {
-  const updates = { [`docs/${doc.id}`]: null, [`users/${uid}/docs/${doc.id}`]: null };
+  const updates = { [`docs/${doc.id}`]: null, [`images/${doc.id}`]: null, [`users/${uid}/docs/${doc.id}`]: null };
   for (const key of Object.keys(doc.invites || {})) updates[`invites/${key}/${doc.id}`] = null;
   return db.update(updates);
 }
@@ -90,11 +90,12 @@ export async function addSection(docId, user, title, order, extra = {}) {
     order,
     ...(extra.tag ? { tag: extra.tag } : {}),
     ...(extra.parentId ? { parentId: extra.parentId } : {}),
+    ...(extra.tabId && !extra.parentId ? { tabId: extra.tabId } : {}),
   });
   return id;
 }
 
-function sectionUpdates(docId, user, titles, startOrder) {
+function sectionUpdates(docId, user, titles, startOrder, tabId = null) {
   const updates = {};
   titles.forEach((title, i) => {
     updates[`docs/${docId}/sections/${db.key()}`] = {
@@ -102,13 +103,14 @@ function sectionUpdates(docId, user, titles, startOrder) {
       createdBy: user.uid,
       createdAt: db.TIMESTAMP,
       order: startOrder + i,
+      ...(tabId ? { tabId } : {}),
     };
   });
   return updates;
 }
 
 /** Add several sections in one write; they share a timestamp, so the first counts as latest. */
-export const addSections = (docId, user, titles, startOrder) => db.update(sectionUpdates(docId, user, titles, startOrder));
+export const addSections = (docId, user, titles, startOrder, tabId = null) => db.update(sectionUpdates(docId, user, titles, startOrder, tabId));
 
 export const renameSection = (docId, sid, title) => db.set(`docs/${docId}/sections/${sid}/title`, title.trim());
 export const deleteSection = (docId, sid) => db.remove(`docs/${docId}/sections/${sid}`);
@@ -206,50 +208,128 @@ export const unlockDraft = (docId) => db.remove(`docs/${docId}/draft/lock`);
 export const discardDraft = (docId) => db.remove(`docs/${docId}/draft`);
 
 /**
- * Add an imported outline in one write. Headings become topics (subtopics nest under
- * the section in `contextSection`), notes nest by depth. Returns the item count.
+ * Add an imported outline (see planOutline): tabs, topics nested by rank, notes nested
+ * by depth. Root topics of a plain paste nest by heading level under `contextSection`;
+ * notes before any heading go to `contextSection`; new topics land in `tabId` unless
+ * the outline brings its own tabs. `imageIds` maps importer image keys to stored ids.
+ * Writes in chunks so huge docs stay under request limits; reports progress.
  */
-export async function importOutline(docId, user, items, { sections = {}, contextSection = null } = {}) {
+export async function importOutline(
+  docId,
+  user,
+  items,
+  { sections = {}, tabs = {}, contextSection = null, tabId = null, imageIds = null, onProgress = null } = {},
+) {
+  const plan = planOutline(items);
   const local = { ...(sections || {}) };
-  const updates = {};
-  let sectionCtx = contextSection;
-  let stack = [];
+  const ids = new Map(); // plan index → db id
+  const structure = {};
+  const notes = [];
+  let tabOrder = nextOrder(tabs || {});
+  // A doc without tabs that imports some: what it already had stays together in “Tab 1”.
+  if (tabOrder === 0 && plan.some((it) => it.kind === "tab") && Object.keys(sections || {}).length)
+    structure[`docs/${docId}/tabs/${db.key()}`] = { title: "Tab 1", createdBy: user.uid, createdAt: db.TIMESTAMP, order: tabOrder++ };
   let tick = Date.now();
-  for (const it of items) {
+  // Pictures that couldn't be stored are left out rather than shown broken.
+  const fixImages = (text) =>
+    imageIds ? text.replace(/!\[([^\]]*)\]\(img:([\w-]+)\)/g, (m, alt, key) => (imageIds.has(key) ? `![${alt}](img:${imageIds.get(key)})` : "")).trim() : text;
+  plan.forEach((it, i) => {
+    if (it.kind === "tab") {
+      const id = db.key();
+      ids.set(i, id);
+      structure[`docs/${docId}/tabs/${id}`] = { title: it.text, createdBy: user.uid, createdAt: db.TIMESTAMP, order: tabOrder++ };
+      return;
+    }
     if (it.kind === "section") {
-      const parent = headingParent(local, it.level, sectionCtx);
+      const parent = it.parent != null ? ids.get(it.parent) : it.level != null && it.tab == null ? headingParent(local, it.level, contextSection) : null;
+      const tab = parent ? null : it.tab != null ? ids.get(it.tab) : tabId;
       const order = nextOrder(local, parent);
       const id = db.key();
-      updates[`docs/${docId}/sections/${id}`] = {
+      ids.set(i, id);
+      structure[`docs/${docId}/sections/${id}`] = {
         title: it.text,
         createdBy: user.uid,
         createdAt: db.TIMESTAMP,
         order,
         ...(parent ? { parentId: parent } : {}),
+        ...(tab ? { tabId: tab } : {}),
       };
       local[id] = { title: it.text, order, createdAt: tick++, ...(parent ? { parentId: parent } : {}) };
-      sectionCtx = id;
-      stack = [];
-      continue;
+      return;
     }
-    const d = Math.min(it.depth || 0, stack.length);
-    const parentId = d > 0 ? stack[d - 1] : null;
+    const text = fixImages(it.text);
+    if (!text) {
+      ids.set(i, it.noteParent != null ? ids.get(it.noteParent) : null); // its sub-points move up
+      return;
+    }
     const id = db.key();
-    const tags = extractTags(it.text);
-    updates[`docs/${docId}/notes/${id}`] = {
-      author: user.uid,
-      authorName: user.name,
-      text: it.text,
-      sectionId: sectionCtx || null,
-      parentId,
-      tags: tags.length ? tags : null,
-      createdAt: db.TIMESTAMP,
-    };
-    stack = [...stack.slice(0, d), id];
+    ids.set(i, id);
+    const tags = extractTags(text);
+    notes.push([
+      `docs/${docId}/notes/${id}`,
+      {
+        author: user.uid,
+        authorName: user.name,
+        text,
+        sectionId: it.section != null ? ids.get(it.section) : contextSection || null,
+        parentId: (it.noteParent != null && ids.get(it.noteParent)) || null,
+        tags: tags.length ? tags : null,
+        createdAt: db.TIMESTAMP,
+      },
+    ]);
+  });
+  const CHUNK = 400;
+  const total = notes.length;
+  onProgress?.(0, total);
+  const entries = Object.entries(structure);
+  for (let i = 0; i < entries.length; i += CHUNK * 2) await db.update(Object.fromEntries(entries.slice(i, i + CHUNK * 2)));
+  for (let i = 0; i < notes.length; i += CHUNK) {
+    await db.update(Object.fromEntries(notes.slice(i, i + CHUNK)));
+    onProgress?.(Math.min(total, i + CHUNK), total);
   }
-  await db.update(updates);
-  return items.length;
+  return { notes: total, sections: entries.filter(([p]) => p.includes("/sections/")).length, tabs: entries.filter(([p]) => p.includes("/tabs/")).length };
 }
+
+// ───────────── Tabs ─────────────
+
+export async function addTab(docId, user, title, order, parentId = null) {
+  const id = db.key();
+  await db.set(`docs/${docId}/tabs/${id}`, {
+    title: title.trim() || "Untitled tab",
+    createdBy: user.uid,
+    createdAt: db.TIMESTAMP,
+    order,
+    ...(parentId ? { parentId } : {}),
+  });
+  return id;
+}
+export const renameTab = (docId, tabId, title) => db.set(`docs/${docId}/tabs/${tabId}/title`, title.trim() || "Untitled tab");
+export const reorderTabs = (docId, ids) =>
+  db.update(Object.fromEntries(ids.map((id, i) => [`docs/${docId}/tabs/${id}/order`, i])));
+/** Delete a tab, its child tabs and their topics; their notes fall back to Unsorted. */
+export const deleteTab = (docId, tabIds, sectionIds) =>
+  db.update(
+    Object.fromEntries([
+      ...tabIds.map((id) => [`docs/${docId}/tabs/${id}`, null]),
+      ...sectionIds.map((id) => [`docs/${docId}/sections/${id}`, null]),
+    ]),
+  );
+/** Move a topic (and its subtopics) to another tab. */
+export const moveSectionToTab = (docId, sid, tabId, order) =>
+  db.update({
+    [`docs/${docId}/sections/${sid}/tabId`]: tabId,
+    [`docs/${docId}/sections/${sid}/parentId`]: null,
+    [`docs/${docId}/sections/${sid}/order`]: order,
+  });
+
+// ───────────── Images ─────────────
+
+export async function saveImage(docId, user, { data, w, h }) {
+  const id = db.key();
+  await db.set(`images/${docId}/${id}`, { data, w, h, by: user.uid, at: db.TIMESTAMP });
+  return id;
+}
+export const getImage = (docId, id) => db.get(`images/${docId}/${id}`);
 
 /** Hand-merge a paraphrase: `noteId` collapses into whatever group `targetId` is in. */
 export const mergeNotes = (docId, noteId, targetId) => db.set(`docs/${docId}/merges/${noteId}`, targetId);

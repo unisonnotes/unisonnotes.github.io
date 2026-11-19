@@ -1,14 +1,19 @@
-// Turn documents from other tools into Unison's shape: headings become topics and
-// subtopics, list items and paragraphs become (nested) notes, and inline bold /
-// italic / strikethrough / code carry over as Unison's light Markdown.
-// Supports .docx (Word, Google Docs download), .html (Google Docs "Web page", any page),
-// pasted rich text, and .md / .txt.
-import { parseOutline } from "./weave.js";
+// Turn documents from other tools into Unison's shape. Formatting is read the way a
+// person reads it (see inferOutline in weave.js): real headings, big text, page/section
+// breaks and short labels right before lists become topics; lists become nested notes.
+// Inline bold / italic / underline / strikethrough / highlight / links / sub- and
+// superscript carry over as Unison's light Markdown, and pictures come along as images.
+// Supports .docx (Word, Google Docs → Download → .docx), .html, rich paste, .md and .txt.
+import { parseOutline, inferOutline } from "./weave.js";
 
-const MAX_NOTE = 3800;
 const W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+const R = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+const A = "http://schemas.openxmlformats.org/drawingml/2006/main";
 
-/** Read a File into {title, items}. Items match parseOutline: {kind: "section", text, level} | {kind: "note", text, depth}. */
+/**
+ * Read a File. Returns {title, items, images: Map<key, Blob>, style?: {font, size}}.
+ * Items use ![](img:<key>) for pictures; keys are replaced with stored ids on import.
+ */
 export async function readImport(file) {
   const ext = (file.name.split(".").pop() || "").toLowerCase();
   const base = file.name.replace(/\.[^.]+$/, "");
@@ -17,190 +22,77 @@ export async function readImport(file) {
   else if (ext === "html" || ext === "htm") out = htmlToOutline(await file.text());
   else if (["md", "markdown", "txt", "text"].includes(ext)) out = textToOutline(await file.text());
   else throw new Error("Unsupported file. Use .docx, .html, .md or .txt.");
-  return { title: out.title || base, items: out.items };
+  return { ...out, title: out.title || base };
 }
 
 export function textToOutline(text) {
-  return finish(parseOutline(text));
-}
-
-// ───────────── Shared clean-up ─────────────
-
-/** Map whatever heading levels a doc used onto topic / subtopic / sub-subtopic, pull out a title, split huge notes. */
-function finish(items) {
-  items = items.filter((it) => it.text && it.text.trim());
+  const items = parseOutline(text);
   let title = null;
-  const secs = items.filter((it) => it.kind === "section");
-  if (items[0]?.kind === "section" && items[0].title) {
-    title = items[0].text;
-    items = items.slice(1);
-  } else if (items[0]?.kind === "section" && secs.length > 1) {
-    // A lone top-level heading followed only by deeper headings is the doc's title.
-    const first = items[0];
-    const rest = secs.slice(1);
-    if (rest.every((s) => s.level > first.level)) {
-      title = first.text;
-      items = items.slice(1);
-    }
+  if (items[0]?.kind === "section" && items.filter((i) => i.kind === "section" && i.level === items[0].level).length === 1 && items.length > 1) {
+    title = items.shift().text;
   }
-  const levels = [...new Set(items.filter((it) => it.kind === "section").map((it) => it.level))].sort((a, b) => a - b);
-  const rank = new Map(levels.map((l, i) => [l, Math.min(i, 2)]));
-  const out = [];
-  for (const it of items) {
-    if (it.kind === "section") {
-      out.push({ kind: "section", text: it.text.replace(/\s+/g, " ").trim().slice(0, 200), level: rank.get(it.level) ?? 0 });
-      continue;
-    }
-    const text = it.text.trim();
-    if (text.length <= MAX_NOTE) {
-      out.push({ kind: "note", text, depth: Math.min(it.depth || 0, 4) });
-      continue;
-    }
-    // Split very long paragraphs at sentence ends so each fits in a note.
-    const parts = text.match(new RegExp(`[\\s\\S]{1,${MAX_NOTE}}(?:[.!?](?=\\s)|$)|[\\s\\S]{1,${MAX_NOTE}}`, "g")) || [text];
-    for (const p of parts) if (p.trim()) out.push({ kind: "note", text: p.trim(), depth: Math.min(it.depth || 0, 4) });
-  }
-  return { title, items: out };
+  return { title, items, images: new Map() };
 }
 
-const wrapMd = (text, { b, i, s, code }) => {
+// ───────────── Runs → Markdown ─────────────
+
+const SUP = { 0: "⁰", 1: "¹", 2: "²", 3: "³", 4: "⁴", 5: "⁵", 6: "⁶", 7: "⁷", 8: "⁸", 9: "⁹", "+": "⁺", "-": "⁻", "=": "⁼", "(": "⁽", ")": "⁾", n: "ⁿ", i: "ⁱ" };
+const SUB = { 0: "₀", 1: "₁", 2: "₂", 3: "₃", 4: "₄", 5: "₅", 6: "₆", 7: "₇", 8: "₈", 9: "₉", "+": "₊", "-": "₋", "=": "₌", "(": "₍", ")": "₎" };
+const script = (text, map) => ([...text].every((c) => map[c] || c === " ") ? [...text].map((c) => map[c] || c).join("") : null);
+
+const SAME = ["b", "i", "u", "s", "hl", "code", "link"];
+const wrapMd = (r) => {
+  let text = r.text;
   if (!text.trim()) return text;
   const lead = text.match(/^\s*/)[0];
   const trail = text.match(/\s*$/)[0];
   let core = text.trim();
-  if (code) return `${lead}\`${core.replace(/`/g, "'")}\`${trail}`;
-  if (s) core = `~~${core}~~`;
-  if (i) core = `*${core}*`;
-  if (b) core = `**${core}**`;
+  if (r.code) core = "`" + core.replace(/`/g, "'") + "`";
+  else {
+    if (r.s) core = `~~${core}~~`;
+    if (r.u && !r.link) core = `++${core}++`;
+    if (r.hl) core = `==${core}==`;
+    if (r.i) core = `*${core}*`;
+    if (r.b) core = `**${core}**`;
+  }
+  if (r.link) core = core === r.link ? r.link : `[${core}](${r.link})`;
   return lead + core + trail;
 };
 
-/** Join formatted runs, merging neighbours with the same formatting so markers don't stutter. */
+/** Join formatted runs into Markdown, merging neighbours with identical formatting. */
 function runsToMd(runs) {
   const merged = [];
   for (const r of runs) {
+    if (r.img) {
+      merged.push({ ...r });
+      continue;
+    }
     const last = merged[merged.length - 1];
-    if (last && last.b === r.b && last.i === r.i && last.s === r.s && last.code === r.code) last.text += r.text;
+    if (last && !last.img && SAME.every((k) => (last[k] || null) === (r[k] || null))) last.text += r.text;
     else merged.push({ ...r });
   }
   return merged
-    .map((r) => wrapMd(r.text, r))
+    .map((r) => (r.img ? ` ![](img:${r.img}) ` : wrapMd(r)))
     .join("")
     .replace(/[ \t]+\n/g, "\n")
-    .replace(/[ \t]{2,}/g, " ");
+    .replace(/[ \t]{2,}/g, " ")
+    .trim();
 }
 
-// ───────────── HTML (Google Docs export, web pages, rich paste) ─────────────
+const FONT_IDS = [
+  [/times/i, "times"],
+  [/georgia/i, "georgia"],
+  [/calibri|carlito|segoe|ubuntu/i, "humanist"],
+  [/arial|helvetica|roboto|open sans|liberation sans/i, "arial"],
+  [/mono|courier|consol/i, "mono"],
+  [/serif|garamond|cambria|charter|cardo|caudex|merriweather|lora|baskerville|book/i, "serif"],
+];
+const fontId = (name) => FONT_IDS.find(([re]) => re.test(name || ""))?.[1] || "sans";
 
-export function htmlToOutline(source) {
-  const doc = new DOMParser().parseFromString(source, "text/html");
-  // Google Docs' HTML export styles text through classes (.c3{font-weight:700}).
-  const classFmt = new Map();
-  for (const st of doc.querySelectorAll("style")) {
-    for (const m of st.textContent.matchAll(/\.([\w-]+)\{([^}]*)\}/g)) {
-      const css = m[2];
-      classFmt.set(m[1], {
-        b: /font-weight:\s*(bold|[6-9]00)/.test(css),
-        i: /font-style:\s*italic/.test(css),
-        s: /line-through/.test(css),
-      });
-    }
-  }
-  doc.querySelectorAll("script, style, noscript, template, head, svg").forEach((n) => n.remove());
+// ───────────── DOCX ─────────────
 
-  const fmtOf = (el, inherited) => {
-    const f = { ...inherited };
-    const tag = el.tagName;
-    if (tag === "B" || tag === "STRONG") f.b = true;
-    if (tag === "I" || tag === "EM") f.i = true;
-    if (tag === "S" || tag === "STRIKE" || tag === "DEL") f.s = true;
-    if (tag === "CODE" || tag === "KBD" || tag === "SAMP") f.code = true;
-    for (const c of el.classList || []) {
-      const cf = classFmt.get(c);
-      if (cf) {
-        if (cf.b) f.b = true;
-        if (cf.i) f.i = true;
-        if (cf.s) f.s = true;
-      }
-    }
-    const st = el.style;
-    if (st) {
-      const fw = st.fontWeight;
-      if (fw === "bold" || +fw >= 600) f.b = true;
-      else if (fw === "normal" || (fw && +fw < 600)) f.b = false;
-      if (st.fontStyle === "italic") f.i = true;
-      else if (st.fontStyle === "normal") f.i = false;
-      if (/line-through/.test(st.textDecoration || st.textDecorationLine || "")) f.s = true;
-    }
-    return f;
-  };
-
-  const BLOCK = /^(P|DIV|H[1-6]|LI|UL|OL|BLOCKQUOTE|PRE|TABLE|TR|TD|TH|SECTION|ARTICLE|HEADER|FOOTER|MAIN|ASIDE|NAV|DL|DT|DD|FIGURE|FIGCAPTION|HR)$/;
-
-  /** Inline content of a block as Markdown, skipping nested blocks (handled separately). */
-  const inline = (el, fmt) => {
-    const runs = [];
-    const walk = (node, f) => {
-      for (const n of node.childNodes) {
-        if (n.nodeType === 3) runs.push({ text: n.nodeValue.replace(/\s+/g, " "), ...f });
-        else if (n.nodeType === 1) {
-          if (BLOCK.test(n.tagName)) continue;
-          if (n.tagName === "BR") runs.push({ text: "\n", ...f });
-          else if (n.tagName === "A") {
-            const href = n.getAttribute("href") || "";
-            const text = n.textContent.replace(/\s+/g, " ");
-            const real = href.replace(/^https?:\/\/www\.google\.com\/url\?q=([^&]+).*$/, (_, u) => decodeURIComponent(u));
-            runs.push({ text: /^https?:/.test(real) && !text.includes(real.replace(/^https?:\/\//, "").slice(0, 12)) ? `${text} (${real})` : text, ...fmtOf(n, f) });
-          } else walk(n, fmtOf(n, f));
-        }
-      }
-    };
-    walk(el, fmt);
-    return runsToMd(runs).trim();
-  };
-
-  const items = [];
-  const listDepth = (li) => {
-    let d = 0;
-    for (let p = li.parentElement; p; p = p.parentElement) if (p.tagName === "LI") d++;
-    // Google Docs flattens nesting into classes like lst-kix_abc-2.
-    const m = /lst-kix_[\w]+-(\d+)/.exec(li.parentElement?.className || "");
-    return m ? Math.max(d, +m[1]) : d;
-  };
-
-  const visit = (el, fmt) => {
-    for (const n of el.children) {
-      const tag = n.tagName;
-      const f = fmtOf(n, fmt);
-      if (/^H[1-6]$/.test(tag)) {
-        const text = n.textContent.replace(/\s+/g, " ").trim();
-        if (text) items.push({ kind: "section", text, level: +tag[1] - 1 });
-      } else if (n.classList.contains("title")) {
-        const text = n.textContent.replace(/\s+/g, " ").trim();
-        if (text) items.push({ kind: "section", text, level: -1, title: true });
-      } else if (tag === "LI") {
-        const text = inline(n, f);
-        if (text) items.push({ kind: "note", text, depth: listDepth(n) });
-        visit(n, f);
-      } else if (tag === "UL" || tag === "OL" || tag === "TABLE" || tag === "TBODY" || tag === "THEAD" || tag === "TR" || /^(SECTION|ARTICLE|MAIN|HEADER|FOOTER|ASIDE|NAV|FIGURE|DL)$/.test(tag)) {
-        visit(n, f);
-      } else if (tag === "HR") {
-        continue;
-      } else if (/^(P|BLOCKQUOTE|PRE|TD|TH|DT|DD|FIGCAPTION)$/.test(tag) || (tag === "DIV" && ![...n.children].some((c) => BLOCK.test(c.tagName)))) {
-        const text = tag === "PRE" ? "`" + n.textContent.trim() + "`" : inline(n, f);
-        if (text) items.push({ kind: "note", text, depth: 0 });
-        if (tag !== "PRE") for (const c of n.children) if (BLOCK.test(c.tagName)) visit({ children: [c] }, f);
-      } else visit(n, f);
-    }
-  };
-  visit(doc.body, {});
-  return finish(items);
-}
-
-// ───────────── DOCX (Word, Google Docs → Download → .docx) ─────────────
-
-/** Read one file out of a zip using the browser's DecompressionStream. */
-async function unzip(buf, wanted) {
+/** Read selected entries out of a zip with the browser's DecompressionStream. */
+async function unzip(buf, want) {
   const v = new DataView(buf);
   let eocd = -1;
   for (let i = buf.byteLength - 22; i >= Math.max(0, buf.byteLength - 65557); i--) {
@@ -212,8 +104,8 @@ async function unzip(buf, wanted) {
   if (eocd < 0) throw new Error("That file isn't a valid .docx.");
   const count = v.getUint16(eocd + 10, true);
   let p = v.getUint32(eocd + 16, true);
-  const out = {};
   const dec = new TextDecoder();
+  const out = {};
   for (let k = 0; k < count; k++) {
     if (v.getUint32(p, true) !== 0x02014b50) break;
     const method = v.getUint16(p + 10, true);
@@ -224,31 +116,41 @@ async function unzip(buf, wanted) {
     const local = v.getUint32(p + 42, true);
     const name = dec.decode(new Uint8Array(buf, p + 46, nameLen));
     p += 46 + nameLen + extraLen + commentLen;
-    if (!wanted.includes(name)) continue;
+    if (!want(name)) continue;
     const start = local + 30 + v.getUint16(local + 26, true) + v.getUint16(local + 28, true);
     const data = new Uint8Array(buf, start, size);
-    if (method === 0) out[name] = dec.decode(data);
-    else if (method === 8) {
-      const stream = new Blob([data]).stream().pipeThrough(new DecompressionStream("deflate-raw"));
-      out[name] = await new Response(stream).text();
-    }
+    out[name] =
+      method === 0
+        ? data.slice()
+        : new Uint8Array(await new Response(new Blob([data]).stream().pipeThrough(new DecompressionStream("deflate-raw"))).arrayBuffer());
   }
   return out;
 }
 
 export async function docxToOutline(buf) {
-  const files = await unzip(buf, ["word/document.xml", "word/styles.xml"]);
+  const files = await unzip(buf, (n) => n === "word/document.xml" || n === "word/styles.xml" || n === "word/_rels/document.xml.rels" || n.startsWith("word/media/"));
   if (!files["word/document.xml"]) throw new Error("Couldn't find the text in that .docx.");
-  return docxXmlToOutline(files["word/document.xml"], files["word/styles.xml"]);
+  const dec = new TextDecoder();
+  const media = new Map(Object.entries(files).filter(([n]) => n.startsWith("word/media/")));
+  return docxXmlToOutline(
+    dec.decode(files["word/document.xml"]),
+    files["word/styles.xml"] && dec.decode(files["word/styles.xml"]),
+    files["word/_rels/document.xml.rels"] && dec.decode(files["word/_rels/document.xml.rels"]),
+    media,
+  );
 }
 
-export function docxXmlToOutline(documentXml, stylesXml) {
+export function docxXmlToOutline(documentXml, stylesXml, relsXml, media = new Map()) {
   const parse = (s) => new DOMParser().parseFromString(s, "application/xml");
-  const attr = (el, name) => el?.getAttributeNS(W, name) ?? el?.getAttribute("w:" + name);
-  const kid = (el, name) => (el ? [...el.childNodes].find((n) => n.localName === name) : null);
-  const on = (el) => el && !/^(0|false|none)$/.test(attr(el, "val") || "");
+  const attr = (el, name) => el?.getAttributeNS(W, name) ?? el?.getAttribute("w:" + name) ?? null;
+  const kid = (el, name) => (el ? [...el.children].find((n) => n.localName === name) : null);
+  const on = (el) => !!el && !/^(0|false|none)$/i.test(attr(el, "val") || "");
 
-  // styleId → {heading level | "title"}; Word localizes ids, names stay English ("heading 1").
+  // Relationships: hyperlinks and pictures.
+  const rels = new Map();
+  if (relsXml) for (const r of parse(relsXml).getElementsByTagName("Relationship")) rels.set(r.getAttribute("Id"), r.getAttribute("Target"));
+
+  // styleId → heading level / title, plus style-level run defaults (size, bold).
   const styles = new Map();
   if (stylesXml) {
     for (const st of parse(stylesXml).getElementsByTagNameNS(W, "style")) {
@@ -256,44 +158,286 @@ export function docxXmlToOutline(documentXml, stylesXml) {
       const name = (attr(kid(st, "name"), "val") || "").toLowerCase();
       const outline = attr(kid(kid(st, "pPr"), "outlineLvl"), "val");
       const m = /^heading (\d)$/.exec(name);
-      if (name === "title") styles.set(id, "title");
-      else if (m) styles.set(id, +m[1] - 1);
-      else if (outline != null && +outline < 9) styles.set(id, +outline);
+      styles.set(id, { title: name === "title", heading: m ? +m[1] : outline != null && +outline < 9 ? +outline + 1 : null, subtitle: name === "subtitle" });
     }
   }
-  const styleLevel = (id) => {
+  const styleOf = (id) => {
     if (styles.has(id)) return styles.get(id);
-    if (/^title$/i.test(id || "")) return "title";
     const m = /^heading(\d)$/i.exec(id || "");
-    return m ? +m[1] - 1 : null;
+    return { title: /^title$/i.test(id || ""), heading: m ? +m[1] : null };
   };
 
-  const items = [];
-  const body = parse(documentXml).getElementsByTagNameNS(W, "body")[0];
-  if (!body) return { title: null, items: [] };
-  for (const p of body.getElementsByTagNameNS(W, "p")) {
-    const pPr = kid(p, "pPr");
+  const images = new Map();
+  let imgN = 0;
+  const addImage = (rid) => {
+    const target = rels.get(rid);
+    const bytes = target && media.get("word/" + target.replace(/^\.?\//, "").replace(/^word\//, ""));
+    if (!bytes) return null;
+    const ext = target.split(".").pop().toLowerCase();
+    if (!/^(png|jpe?g|gif|webp|bmp)$/.test(ext)) return null;
+    const key = `imp${imgN++}`;
+    images.set(key, new Blob([bytes], { type: `image/${ext === "jpg" ? "jpeg" : ext}` }));
+    return key;
+  };
+
+  const fontWeight = new Map();
+  const blocks = [];
+  let nextSectionStart = false;
+  // Google Docs exports each document tab as a section that restarts page numbering.
+  const tabbed = (documentXml.match(/<w:pgNumType[^>]*w:start=/g) || []).length >= 2;
+  let pendingTab = tabbed;
+
+  const runsOf = (p) => {
     const runs = [];
-    for (const r of p.getElementsByTagNameNS(W, "r")) {
-      const rPr = kid(r, "rPr");
-      const f = { b: on(kid(rPr, "b")), i: on(kid(rPr, "i")), s: on(kid(rPr, "strike")) || on(kid(rPr, "dstrike")), code: false };
-      for (const n of r.childNodes) {
-        if (n.localName === "t") runs.push({ text: n.textContent, ...f });
-        else if (n.localName === "tab") runs.push({ text: " ", ...f });
-        else if (n.localName === "br" || n.localName === "cr") runs.push({ text: "\n", ...f });
+    let pageBreak = false;
+    const walk = (node, link) => {
+      for (const n of node.children) {
+        const name = n.localName;
+        if (name === "hyperlink") {
+          const url = rels.get(n.getAttributeNS(R, "id") || n.getAttribute("r:id"));
+          walk(n, url && /^(https?:|mailto:)/i.test(url) ? url : link);
+        } else if (name === "r") {
+          const rPr = kid(n, "rPr");
+          const hl = kid(rPr, "highlight");
+          const shd = attr(kid(rPr, "shd"), "fill");
+          const va = attr(kid(rPr, "vertAlign"), "val");
+          const u = kid(rPr, "u");
+          const f = {
+            b: on(kid(rPr, "b")),
+            i: on(kid(rPr, "i")),
+            u: !!u && !/^none$/i.test(attr(u, "val") || ""),
+            s: on(kid(rPr, "strike")) || on(kid(rPr, "dstrike")),
+            hl: (!!hl && !/^none$/i.test(attr(hl, "val") || "")) || (!!shd && !/^(auto|ffffff|FFFFFF)$/.test(shd)),
+            code: false,
+            link,
+            size: +(attr(kid(rPr, "sz"), "val") || 0) / 2 || null,
+          };
+          const font = kid(rPr, "rFonts")?.getAttributeNS(W, "ascii") || kid(rPr, "rFonts")?.getAttribute("w:ascii");
+          for (const c of n.children) {
+            if (c.localName === "t") {
+              let text = c.textContent;
+              if (va === "superscript") text = script(text, SUP) ?? `^${text}`;
+              else if (va === "subscript") text = script(text, SUB) ?? text;
+              runs.push({ text, ...f });
+              if (font) fontWeight.set(font, (fontWeight.get(font) || 0) + text.length);
+            } else if (c.localName === "tab") runs.push({ text: " ", ...f });
+            else if (c.localName === "br" || c.localName === "cr") {
+              if (attr(c, "type") === "page") pageBreak = true;
+              else runs.push({ text: "\n", ...f });
+            } else if (c.localName === "noBreakHyphen") runs.push({ text: "-", ...f });
+            else if (c.localName === "drawing" || c.localName === "pict" || c.localName === "object") {
+              for (const blip of c.getElementsByTagNameNS(A, "blip")) {
+                const key = addImage(blip.getAttributeNS(R, "embed") || blip.getAttribute("r:embed"));
+                if (key) runs.push({ text: "", img: key });
+              }
+              for (const im of c.getElementsByTagName("v:imagedata")) {
+                const key = addImage(im.getAttributeNS(R, "id") || im.getAttribute("r:id"));
+                if (key) runs.push({ text: "", img: key });
+              }
+            }
+          }
+        } else if (name === "ins" || name === "smartTag" || name === "customXml" || name === "fldSimple" || name === "sdt" || name === "sdtContent") walk(n, link);
+      }
+    };
+    walk(p, null);
+    return { runs, pageBreak };
+  };
+
+  const paragraph = (p, cellDepth = null) => {
+    const pPr = kid(p, "pPr");
+    const st = styleOf(attr(kid(pPr, "pStyle"), "val"));
+    const numPr = kid(pPr, "numPr");
+    const outline = attr(kid(pPr, "outlineLvl"), "val");
+    const { runs, pageBreak } = runsOf(p);
+    const textRuns = runs.filter((r) => !r.img);
+    const chars = textRuns.reduce((n, r) => n + r.text.trim().length, 0);
+    const sizes = new Map();
+    for (const r of textRuns) if (r.size && r.text.trim()) sizes.set(r.size, (sizes.get(r.size) || 0) + r.text.length);
+    const size = [...sizes].sort((a, b) => b[1] - a[1])[0]?.[0] || null;
+    const bold = chars > 0 && textRuns.filter((r) => r.b).reduce((n, r) => n + r.text.trim().length, 0) >= chars * 0.9;
+    const imgs = runs.filter((r) => r.img).map((r) => r.img);
+    const sectionStart = nextSectionStart || !!kid(pPr, "pageBreakBefore");
+    if (chars || imgs.length) {
+      nextSectionStart = false;
+      if (pendingTab) {
+        blocks.push({ type: "tab" });
+        pendingTab = false;
       }
     }
-    const text = runsToMd(runs).trim();
-    if (!text) continue;
-    const level = styleLevel(attr(kid(pPr, "pStyle"), "val")) ?? (kid(pPr, "outlineLvl") ? +attr(kid(pPr, "outlineLvl"), "val") : null);
-    const plain = text.replace(/[*~`]/g, "");
-    if (level === "title") items.push({ kind: "section", text: plain, level: -1, title: true });
-    else if (level != null && level < 9) items.push({ kind: "section", text: plain, level });
-    else {
-      const numPr = kid(pPr, "numPr");
-      const ilvl = numPr ? +(attr(kid(numPr, "ilvl"), "val") || 0) : 0;
-      items.push({ kind: "note", text, depth: numPr ? ilvl : 0 });
+    const sectPr = kid(pPr, "sectPr");
+    if (sectPr || pageBreak) nextSectionStart = true;
+    if (sectPr && tabbed) pendingTab = true;
+
+    const isList = !!numPr || cellDepth != null;
+    const depth = cellDepth ?? (numPr ? +(attr(kid(numPr, "ilvl"), "val") || 0) : 0);
+    const heading = st.heading ?? (outline != null && +outline < 9 ? +outline + 1 : null);
+    if (isList) {
+      // Pictures inside a bullet stay in that bullet.
+      const text = runsToMd(runs);
+      if (text) blocks.push({ type: "li", text, depth, size, bold });
+      return;
     }
-  }
-  return finish(items);
+    const text = runsToMd(textRuns);
+    if (text) blocks.push({ type: "p", text, size, bold, heading, title: st.title, sectionStart });
+    for (const key of imgs) blocks.push({ type: "img", text: `![](img:${key})` });
+  };
+
+  const body = parse(documentXml).getElementsByTagNameNS(W, "body")[0];
+  if (!body) return { title: null, items: [], images };
+  const visit = (el) => {
+    for (const n of el.children) {
+      if (n.localName === "p") paragraph(n);
+      else if (n.localName === "tbl") {
+        // Tables: one note per row ("a | b | c"); the first row in bold.
+        [...n.getElementsByTagNameNS(W, "tr")].forEach((tr, i) => {
+          const cells = [...tr.children]
+            .filter((c) => c.localName === "tc")
+            .map((tc) =>
+              [...tc.getElementsByTagNameNS(W, "p")]
+                .map((p) => runsToMd(runsOf(p).runs))
+                .filter(Boolean)
+                .join(" / "),
+            );
+          if (!cells.some((c) => c.trim())) return;
+          if (pendingTab) {
+            blocks.push({ type: "tab" });
+            pendingTab = false;
+          }
+          while (cells.length > 1 && !cells[cells.length - 1].trim()) cells.pop();
+          const head = (c) => (!c || c.startsWith("*") ? c : `**${c}**`);
+          blocks.push({ type: "li", text: i === 0 ? cells.map(head).join(" | ") : cells.join(" | "), depth: i === 0 ? 0 : 1 });
+        });
+      } else if (n.localName === "sdt") visit(kid(n, "sdtContent") || n);
+    }
+  };
+  visit(body);
+
+  const out = inferOutline(blocks);
+  const font = [...fontWeight].sort((a, b) => b[1] - a[1])[0]?.[0];
+  const sizeWeight = new Map();
+  for (const b of blocks) if (b.size && b.type !== "img") sizeWeight.set(b.size, (sizeWeight.get(b.size) || 0) + b.text.length);
+  const pt = [...sizeWeight].sort((a, b) => b[1] - a[1])[0]?.[0];
+  return {
+    ...out,
+    images,
+    style: { font: font ? fontId(font) : undefined, size: pt ? Math.max(10, Math.min(28, Math.round((pt * 4) / 3))) : undefined },
+  };
+}
+
+// ───────────── HTML (Google Docs "Web page", any page, rich paste) ─────────────
+
+export function htmlToOutline(source) {
+  const doc = new DOMParser().parseFromString(source, "text/html");
+  // Google Docs' HTML export styles text through classes (.c3{font-weight:700}).
+  const classCss = new Map();
+  for (const st of doc.querySelectorAll("style")) for (const m of st.textContent.matchAll(/\.([\w-]+)\{([^}]*)\}/g)) classCss.set(m[1], m[2]);
+  doc.querySelectorAll("script, style, noscript, template, head, svg").forEach((n) => n.remove());
+
+  const images = new Map();
+  let imgN = 0;
+  const addImage = (src) => {
+    const m = /^data:(image\/[\w+.-]+);base64,(.*)$/s.exec(src || "");
+    if (!m) return null;
+    const bin = atob(m[2]);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    const key = `imp${imgN++}`;
+    images.set(key, new Blob([bytes], { type: m[1] }));
+    return key;
+  };
+
+  const cssOf = (el) => (el.getAttribute?.("style") || "") + ";" + [...(el.classList || [])].map((c) => classCss.get(c) || "").join(";");
+  const fmtOf = (el, f) => {
+    f = { ...f };
+    const tag = el.tagName;
+    const css = cssOf(el);
+    if (tag === "B" || tag === "STRONG") f.b = true;
+    if (tag === "I" || tag === "EM") f.i = true;
+    if (tag === "U" || tag === "INS") f.u = true;
+    if (tag === "S" || tag === "STRIKE" || tag === "DEL") f.s = true;
+    if (tag === "MARK") f.hl = true;
+    if (tag === "CODE" || tag === "KBD" || tag === "SAMP") f.code = true;
+    const fw = /font-weight:\s*(\w+)/.exec(css)?.[1];
+    if (fw) f.b = fw === "bold" || +fw >= 600;
+    const fs = /font-style:\s*(\w+)/.exec(css)?.[1];
+    if (fs) f.i = fs === "italic";
+    if (/text-decoration[^;]*underline/.test(css)) f.u = true;
+    if (/text-decoration[^;]*line-through/.test(css)) f.s = true;
+    const bg = /background-color:\s*([^;]+)/.exec(css)?.[1]?.trim();
+    if (bg && !/^(transparent|#fff(fff)?|white|rgba?\(\s*255,\s*255,\s*255)/i.test(bg)) f.hl = true;
+    const size = /font-size:\s*([\d.]+)(pt|px)/.exec(css);
+    if (size) f.size = size[2] === "px" ? +size[1] * 0.75 : +size[1];
+    return f;
+  };
+
+  const BLOCK = /^(P|DIV|H[1-6]|LI|UL|OL|BLOCKQUOTE|PRE|TABLE|THEAD|TBODY|TR|TD|TH|SECTION|ARTICLE|HEADER|FOOTER|MAIN|ASIDE|NAV|DL|DT|DD|FIGURE|FIGCAPTION|HR)$/;
+  const inline = (el, f0) => {
+    const runs = [];
+    const walk = (node, f) => {
+      for (const n of node.childNodes) {
+        if (n.nodeType === 3) runs.push({ text: n.nodeValue.replace(/\s+/g, " "), ...f });
+        else if (n.nodeType === 1 && !BLOCK.test(n.tagName)) {
+          if (n.tagName === "BR") runs.push({ text: "\n", ...f });
+          else if (n.tagName === "IMG") {
+            const key = addImage(n.getAttribute("src"));
+            if (key) runs.push({ text: "", img: key });
+          } else if (n.tagName === "SUP" || n.tagName === "SUB") {
+            const t = n.textContent;
+            runs.push({ text: script(t, n.tagName === "SUP" ? SUP : SUB) ?? t, ...f });
+          } else if (n.tagName === "A") {
+            const href = (n.getAttribute("href") || "").replace(/^https?:\/\/www\.google\.com\/url\?q=([^&]+).*$/, (_, u) => decodeURIComponent(u));
+            walk(n, { ...fmtOf(n, f), u: false, link: /^(https?:|mailto:)/.test(href) ? href : f.link });
+          } else walk(n, fmtOf(n, f));
+        }
+      }
+    };
+    walk(el, f0);
+    const textRuns = runs.filter((r) => !r.img);
+    const chars = textRuns.reduce((n, r) => n + r.text.trim().length, 0);
+    const sizes = new Map();
+    for (const r of textRuns) if (r.size && r.text.trim()) sizes.set(r.size, (sizes.get(r.size) || 0) + r.text.length);
+    return {
+      runs,
+      size: [...sizes].sort((a, b) => b[1] - a[1])[0]?.[0] || f0.size || null,
+      bold: chars > 0 && textRuns.filter((r) => r.b).reduce((n, r) => n + r.text.trim().length, 0) >= chars * 0.9,
+    };
+  };
+
+  const blocks = [];
+  let sectionStart = false;
+  const listDepth = (li) => {
+    let d = 0;
+    for (let p = li.parentElement; p; p = p.parentElement) if (p.tagName === "LI") d++;
+    const m = /lst-kix_[\w]+-(\d+)/.exec(li.parentElement?.className || "");
+    return m ? Math.max(d, +m[1]) : d;
+  };
+  const visit = (el, f) => {
+    for (const n of el.children) {
+      const tag = n.tagName;
+      const nf = fmtOf(n, f);
+      if (tag === "HR" || /page-break-(before|after):\s*always/.test(cssOf(n))) sectionStart = true;
+      if (/^H[1-6]$/.test(tag) || tag === "P" || n.classList.contains("title") || /^(BLOCKQUOTE|PRE|TD|TH|DT|DD|FIGCAPTION)$/.test(tag) || (tag === "DIV" && ![...n.children].some((c) => BLOCK.test(c.tagName)))) {
+        const { runs, size, bold } = inline(n, nf);
+        const textRuns = runs.filter((r) => !r.img);
+        const text = tag === "PRE" ? "`" + n.textContent.trim() + "`" : runsToMd(textRuns);
+        const heading = /^H[1-6]$/.test(tag) ? +tag[1] : null;
+        if (text) {
+          blocks.push({ type: "p", text, size, bold, heading, title: n.classList.contains("title"), sectionStart });
+          sectionStart = false;
+        }
+        for (const r of runs) if (r.img) blocks.push({ type: "img", text: `![](img:${r.img})` });
+        if (tag !== "PRE") for (const c of n.children) if (BLOCK.test(c.tagName)) visit({ children: [c] }, nf);
+      } else if (tag === "LI") {
+        const { runs, size, bold } = inline(n, nf);
+        const text = runsToMd(runs);
+        if (text) blocks.push({ type: "li", text, depth: listDepth(n), size, bold });
+        visit(n, nf);
+      } else if (tag === "IMG") {
+        const key = addImage(n.getAttribute("src"));
+        if (key) blocks.push({ type: "img", text: `![](img:${key})` });
+      } else if (tag !== "HR") visit(n, nf);
+    }
+  };
+  visit(doc.body, {});
+  return { ...inferOutline(blocks), images };
 }

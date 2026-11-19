@@ -11,6 +11,7 @@ import { EditBox } from "./editbox.js";
 import { parseInput, parseOutline, extractTags, nextOrder, headingParent, streamOutline, slug, MAX_DEPTH } from "../weave.js";
 import * as store from "../store.js";
 import { htmlToOutline } from "../importer.js";
+import { addImage } from "../images.js";
 
 const HEADING_RE = /^(#{1,3})(?!#)/;
 // [label, Markdown wrapper, shortcut, icon]
@@ -220,7 +221,7 @@ function Composer({ ctx }) {
 
   const createHeading = async (title, lvl, contextId, sections) => {
     const parent = headingParent(sections, lvl, contextId);
-    const id = await store.addSection(docId, user, title, nextOrder(sections, parent), { parentId: parent });
+    const id = await store.addSection(docId, user, title, nextOrder(sections, parent), { parentId: parent, tabId: ctx.activeTab });
     return { id, parent };
   };
 
@@ -248,21 +249,74 @@ function Composer({ ctx }) {
     }
   };
 
+  const insertAt = (s, end, piece) => {
+    const next = text.slice(0, s) + piece + text.slice(end);
+    setText(next);
+    focusEnd(s + piece.length);
+  };
+
+  /** A picture pasted or dropped into the composer: shrink, store, insert ![](img:id). */
+  const addPicture = async (file, s, end) => {
+    setSending(true);
+    try {
+      const id = await addImage(docId, user, file);
+      insertAt(s, end, `${s > 0 && !/\s$/.test(text.slice(0, s)) ? " " : ""}![](img:${id}) `);
+    } catch (err) {
+      toast(err.message || "Couldn't add that picture", { icon: "triangle-alert", tone: "danger" });
+    } finally {
+      setSending(false);
+    }
+  };
+  const onDrop = (e) => {
+    const file = [...(e.dataTransfer?.files || [])].find((f) => f.type.startsWith("image/"));
+    if (!file) return;
+    e.preventDefault();
+    addPicture(file, text.length, text.length);
+  };
+
   // Paste a whole outline: lines become bullets, indentation becomes sub-points, #/## lines become topics.
   const onPaste = async (e) => {
-    const raw = e.clipboardData?.getData("text/plain") || "";
-    const rich = e.clipboardData?.getData("text/html") || "";
-    if (raw.split(/\r?\n/).filter((l) => l.trim()).length < 2) return;
-    e.preventDefault();
     const el = e.target;
     const [s, end] = [el.selectionStart, el.selectionEnd];
-    // Copied out of Google Docs / Word / a web page: keep headings, lists and bold.
+    const picture = [...(e.clipboardData?.files || [])].find((f) => f.type.startsWith("image/"));
+    const raw = e.clipboardData?.getData("text/plain") || "";
+    const rich = e.clipboardData?.getData("text/html") || "";
+    if (picture && !raw.trim()) {
+      e.preventDefault();
+      addPicture(picture, s, end);
+      return;
+    }
+    if (raw.split(/\r?\n/).filter((l) => l.trim()).length < 2) return;
+    e.preventDefault();
+    // Copied out of Google Docs / Word / a web page: keep headings, lists, formatting.
     const fromRich = rich ? htmlToOutline(rich) : null;
-    const items = fromRich?.items.length
-      ? fromRich.title
-        ? [{ kind: "section", text: fromRich.title, level: 0 }, ...fromRich.items.map((it) => (it.kind === "section" ? { ...it, level: Math.min(it.level + 1, 2) } : it))]
-        : fromRich.items
-      : parseOutline(raw);
+    if (fromRich?.items.length) {
+      const items = fromRich.title ? [{ kind: "section", text: fromRich.title, rank: -1 }, ...fromRich.items] : fromRich.items;
+      const ok = await ask({
+        title: `Add ${items.length} lines as separate notes?`,
+        body: "Each paragraph or bullet becomes its own note, nested like the original. Headings become topics.",
+        confirm: `Add ${items.length}`,
+        cancel: "Paste as one note",
+        icon: "list-tree",
+      });
+      if (!ok) return insertAt(s, end, raw);
+      setSending(true);
+      try {
+        const imageIds = new Map();
+        for (const [key, blob] of fromRich.images) imageIds.set(key, await addImage(docId, user, blob));
+        const res = await store.importOutline(docId, user, items, { sections: doc.sections, tabs: doc.tabs, contextSection: resolvedTarget, tabId: ctx.activeTab, imageIds });
+        if (res.sections) ctx.setTarget("auto");
+        setPulse((p) => p + 1);
+        toast(`Added ${items.length} lines`, { icon: "list-tree" });
+      } catch (err) {
+        toast(err.message || "Couldn't add everything", { icon: "triangle-alert", tone: "danger" });
+      } finally {
+        setSending(false);
+        focusEnd(0);
+      }
+      return;
+    }
+    const items = parseOutline(raw);
     const ok = await ask({
       title: `Add ${items.length} lines as separate notes?`,
       body: "Each line becomes its own bullet. Indented lines become sub-points, and lines starting with # or ## become topics.",
@@ -270,12 +324,7 @@ function Composer({ ctx }) {
       cancel: "Paste as one note",
       icon: "list-tree",
     });
-    if (!ok) {
-      const next = text.slice(0, s) + raw + text.slice(end);
-      setText(next);
-      focusEnd(s + raw.length);
-      return;
-    }
+    if (!ok) return insertAt(s, end, raw);
     setSending(true);
     try {
       const sections = { ...doc.sections };
@@ -408,6 +457,7 @@ function Composer({ ctx }) {
         onClick=${(e) => setCaret(e.target.selectionStart)}
         onKeyDown=${onKeyDown}
         onPaste=${onPaste}
+        onDrop=${onDrop}
         aria-label="Write a note"
         data-tour="composer-input"
       />
@@ -455,6 +505,8 @@ function useOutline(ctx, uid) {
   }, [doc.notes, uid]);
 }
 
+const PANEL_PAGE = 200;
+
 export function StreamPanel({ ctx, onClose }) {
   const { user, canEdit, mergeFrom } = ctx;
   const outline = useOutline(ctx, user.uid);
@@ -475,6 +527,9 @@ export function StreamPanel({ ctx, onClose }) {
   useLayoutEffect(() => {
     if (listRef.current) listRef.current.scrollTop = listRef.current.scrollHeight;
   }, []);
+  // Long streams (a big import) show their newest notes first; earlier ones load on request.
+  const [limit, setLimit] = useState(PANEL_PAGE);
+  const hidden = Math.max(0, outline.length - limit);
 
   // Closest earlier entry at the same depth, without crossing into a shallower branch.
   const prevSibling = (i) => {
@@ -496,8 +551,10 @@ export function StreamPanel({ ctx, onClose }) {
       <button class="icon-btn icon-btn--sm" onClick=${onClose} aria-label="Close panel"><${Icon} name="x" size=${15} /></button>
     </div>
     <ol class="my-notes" ref=${listRef}>
-      ${outline.map(
-        (e, i) => html`<${MyNote} key=${e.note.id} ctx=${ctx} entry=${e} prevSibling=${prevSibling(i)} fresh=${!seen.current.has(e.note.id)} />`,
+      ${hidden > 0 &&
+      html`<li class="panel-more"><button class="btn btn--ghost btn--sm" onClick=${() => setLimit((n) => n + PANEL_PAGE * 4)}>Show ${Math.min(hidden, PANEL_PAGE * 4).toLocaleString()} earlier notes <span class="mono">${hidden.toLocaleString()} hidden</span></button></li>`}
+      ${outline.slice(hidden).map(
+        (e, k) => html`<${MyNote} key=${e.note.id} ctx=${ctx} entry=${e} prevSibling=${prevSibling(hidden + k)} fresh=${!seen.current.has(e.note.id)} />`,
       )}
       ${!outline.length &&
       html`<li class="panel-empty">

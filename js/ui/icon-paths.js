@@ -1,5 +1,8 @@
 // Lucide icons (ISC license, lucide.dev): inner SVG markup keyed by name.
 export const ICONS = {
+  "file": `<path d="M6 22a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h8a2.4 2.4 0 0 1 1.704.706l3.588 3.588A2.4 2.4 0 0 1 20 8v12a2 2 0 0 1-2 2z" /><path d="M14 2v5a1 1 0 0 0 1 1h5" />`,
+  "panel-top": `<rect width="18" height="18" x="3" y="3" rx="2" /><path d="M3 9h18" />`,
+  "image": `<rect width="18" height="18" x="3" y="3" rx="2" ry="2" /><circle cx="9" cy="9" r="2" /><path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21" />`,
   "arrow-down": `<path d="M12 5v14" /><path d="m19 12-7 7-7-7" />`,
   "plus": `<path d="M5 12h14" /><path d="M12 5v14" />`,
   "search": `<path d="m21 21-4.34-4.34" /><circle cx="11" cy="11" r="8" />`,

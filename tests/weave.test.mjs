@@ -11,6 +11,8 @@ import {
   streamOutline,
   inlineHtml,
   weaveToHtml,
+  inferOutline,
+  planOutline,
   orderedSections,
   headingParent,
   nextOrder,
@@ -286,4 +288,89 @@ test("weave HTML keeps headings by depth and nested lists", () => {
   assert.match(html, /Notes by Ana, Ben/);
   assert.match(html, /<h2>Cells<\/h2>\n<ul><li>Mitochondria make <strong>ATP<\/strong><ul><li>via the ETC<\/li><\/ul><\/li><\/ul>/);
   assert.match(html, /<h3>Cristae<\/h3>/);
+});
+
+test("inferring structure from a mostly-unstyled doc", () => {
+  const p = (text, extra = {}) => ({ type: "p", text, size: 13, ...extra });
+  const li = (text, depth = 0) => ({ type: "li", text, depth, size: 13 });
+  const { title, items } = inferOutline([
+    p("BIO NOTES", { size: 70 }),
+    p("-By Taj"),
+    p("The Brain", { size: 50, sectionStart: true }),
+    p("Nervous System", { title: true, sectionStart: true }),
+    p("Neurons"),
+    li("Receive and transmit signals"),
+    li("Cell body", 1),
+    p("28.15: The human brain", { heading: 1 }),
+    p("Cortex"),
+    { type: "img", text: "![](img:a)" },
+    li("Folded"),
+    p("This is a long ordinary sentence that just explains something in prose form."),
+    p("Evolution", { sectionStart: true }),
+    p("Charles Darwin"),
+    li("Natural selection"),
+  ]);
+  assert.equal(title, "BIO NOTES");
+  const secs = items.filter((i) => i.kind === "section").map((i) => [i.text, i.rank]);
+  assert.deepEqual(secs, [
+    ["The Brain", 10],
+    ["Nervous System", 10],
+    ["Neurons", 40],
+    ["28.15: The human brain", 21],
+    ["Cortex", 40],
+    ["Evolution", 10],
+    ["Charles Darwin", 40],
+  ]);
+  const plan = planOutline(items);
+  const at = (text) => plan.find((i) => i.text === text);
+  assert.equal(at("Nervous System").parent, null, "parts are top-level topics");
+  assert.equal(plan[at("Neurons").parent].text, "Nervous System");
+  assert.equal(plan[at("Cortex").parent].text, "28.15: The human brain");
+  assert.equal(at("Cortex").depth, 2);
+  assert.equal(plan[at("Cell body").noteParent].text, "Receive and transmit signals");
+  assert.equal(plan[at("![](img:a)").section].text, "Cortex");
+  assert.equal(at("This is a long ordinary sentence that just explains something in prose form.").kind, "note");
+  assert.equal(plan[at("Charles Darwin").parent].text, "Evolution");
+});
+
+test("planOutline never nests topics deeper than three levels", () => {
+  const plan = planOutline([
+    { kind: "section", text: "a", rank: 1 },
+    { kind: "section", text: "b", rank: 2 },
+    { kind: "section", text: "c", rank: 3 },
+    { kind: "section", text: "d", rank: 4 },
+    { kind: "note", text: "n", depth: 3 },
+  ]);
+  assert.deepEqual(plan.map((i) => i.depth), [0, 1, 2, 2, 0]);
+  assert.equal(plan[3].parent, 1);
+});
+
+test("inline HTML handles images, labelled links and underline", () => {
+  assert.equal(
+    inlineHtml("++under++ ![chart](img:abc) [Video](https://x.com/v)"),
+    '<u>under</u> <img data-img="abc" alt="chart"> <a href="https://x.com/v">Video</a>',
+  );
+});
+
+test("tabs from an imported doc: named, empty ones dropped, loose notes get a topic", () => {
+  const p = (text, extra = {}) => ({ type: "p", text, size: 13, ...extra });
+  const li = (text) => ({ type: "li", text, depth: 0, size: 13 });
+  const tab = { type: "tab" };
+  const { title, items } = inferOutline([
+    tab, p("BIO NOTES", { size: 70 }), p("-By Taj"),
+    tab, p("The Brain", { size: 50, sectionStart: true }),
+    tab, p("Nervous system", { sectionStart: true }), p("Neurons"), li("Fire"),
+    tab, p("Watch the following video to learn about the parts of the microscope and how to use it", { sectionStart: true }), li("Part 1"),
+  ]);
+  assert.equal(title, "BIO NOTES");
+  assert.deepEqual(items.filter((i) => i.kind === "tab").map((i) => i.text), ["Cover", "Nervous system", "Watch the following video to learn about the parts of the…"]);
+  const plan = planOutline(items);
+  const fire = plan.find((i) => i.text === "Fire");
+  assert.equal(plan[fire.tab].text, "Nervous system");
+  assert.equal(plan[fire.section].text, "Neurons");
+  const byline = plan.find((i) => i.text === "-By Taj");
+  assert.equal(plan[byline.section].text, "Cover");
+  const neurons = plan.find((i) => i.text === "Neurons");
+  assert.equal(neurons.parent, null, "the tab-named wrapper topic is dropped");
+  assert.equal(plan.filter((i) => i.kind === "section" && i.text === "Nervous system").length, 0);
 });
