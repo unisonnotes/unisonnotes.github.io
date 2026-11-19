@@ -3,8 +3,9 @@ import { html, useState, useEffect, useRef } from "./h.js";
 import { Icon } from "./icons.js";
 import { Avatar, Menu, toast, ask, clock, timeAgo, colorFor } from "./kit.js";
 import { NoteText } from "./text.js";
+import { EditBox } from "./editbox.js";
 import * as store from "../store.js";
-import { MAX_DEPTH } from "../weave.js";
+import { MAX_DEPTH, extractTags } from "../weave.js";
 
 /** Remember which notes were already on screen so only fresh ones animate in. */
 function useSeen(ids) {
@@ -54,6 +55,107 @@ export function NoteActions({ ctx, note, compact = false, onEdit, extra = [] }) 
   />`;
 }
 
+/** Pending edit/removal suggestions on a note. Authors accept or decline; suggesters can withdraw. */
+export function Suggestions({ ctx, note }) {
+  const { doc, docId, user, nameOf } = ctx;
+  const list = Object.entries(doc.suggestions?.[note.id] || {});
+  if (!list.length) return null;
+  const mine = note.author === user.uid;
+  return html`<div class="suggestions" onClick=${(e) => e.stopPropagation()}>
+    ${list.map(
+      ([uid, s]) => html`<div class="suggestion" key=${uid}>
+        <span class="suggestion-ico"><${Icon} name=${s.kind === "remove" ? "trash-2" : "pencil"} size=${12} /></span>
+        <div class="suggestion-body">
+          <span class="suggestion-who"><b>${uid === user.uid ? "You" : s.name || nameOf(uid)}</b> ${s.kind === "remove" ? "suggest" + (uid === user.uid ? "" : "s") + " removing this" : "suggest" + (uid === user.uid ? "" : "s") + ":"}</span>
+          ${s.kind === "edit" && html`<p class="suggestion-text"><${NoteText} text=${s.text} /></p>`}
+        </div>
+        <span class="suggestion-actions">
+          ${mine &&
+          html`<button class="btn btn--primary btn--sm" onClick=${() =>
+              store.acceptSuggestion(docId, note.id, uid, s, extractTags(s.text || "")).then(() => toast(s.kind === "remove" ? "Note removed" : "Suggestion applied", { icon: "check" }))}>
+              Accept
+            </button>
+            <button class="btn btn--ghost btn--sm" onClick=${() => store.dropSuggestion(docId, note.id, uid)}>Decline</button>`}
+          ${!mine && uid === user.uid && html`<button class="btn btn--ghost btn--sm" onClick=${() => store.dropSuggestion(docId, note.id, uid)}>Withdraw</button>`}
+        </span>
+      </div>`,
+    )}
+  </div>`;
+}
+
+/** One person's note inside an opened point: who wrote it, where to find it, what you can do with it. */
+function PointNote({ ctx, n, item }) {
+  const { user, nameOf, showConflicts, doc, docId, now, canEdit, isOwner } = ctx;
+  const [mode, setMode] = useState(null); // edit | suggest
+  const mine = n.author === user.uid;
+  const who = mine ? "You" : nameOf(n.author);
+  const firstName = who.split(" ")[0];
+  const mySuggestion = doc.suggestions?.[n.id]?.[user.uid];
+  return html`<div class="pt-note">
+    <${Avatar} uid=${n.author} name=${nameOf(n.author)} size=${22} />
+    <div class="pt-note-body">
+      <div class="pt-note-head">
+        <button class="pt-who" onClick=${() => ctx.showInStream(n.id)} title=${`Show in ${mine ? "your" : firstName + "'s"} stream`}>${who}</button>
+        <span class="mono">${clock(n.createdAt)} · ${timeAgo(n.createdAt, now)}</span>
+        ${doc.merges?.[n.id] && html`<span class="badge badge--manual mono">hand-merged</span>`}
+        ${n.editedAt && html`<span class="mono muted">edited</span>`}
+      </div>
+      ${mode === "edit"
+        ? html`<${EditBox}
+            initial=${n.text}
+            onCancel=${() => setMode(null)}
+            onSave=${(text) => {
+              store.editNote(docId, n.id, text, extractTags(text));
+              setMode(null);
+            }}
+          />`
+        : html`<p><${NoteText} text=${n.text} clash=${showConflicts ? item.clashNums : null} /></p>`}
+      ${mode === "suggest" &&
+      html`<div class="suggest-edit">
+        <span class="mono">Suggest a rewrite for ${firstName}</span>
+        <${EditBox}
+          initial=${mySuggestion?.text || n.text}
+          label="send suggestion"
+          onCancel=${() => setMode(null)}
+          onSave=${(text) => {
+            if (text === n.text) return setMode(null);
+            store.suggest(docId, n.id, user, { kind: "edit", text }).then(() => toast(`Suggestion sent to ${firstName}`, { icon: "pencil" }));
+            setMode(null);
+          }}
+        />
+      </div>`}
+      <${Suggestions} ctx=${ctx} note=${n} />
+      <div class="pt-note-actions">
+        <button class="chip-btn chip-btn--sm" onClick=${() => ctx.showInStream(n.id)}><${Icon} name="columns-3" size=${12} /> ${mine ? "In your stream" : `In ${firstName}'s stream`}</button>
+        ${canEdit && html`<button class="chip-btn chip-btn--sm" onClick=${() => ctx.nestUnder(n.id)}><${Icon} name="plus" size=${12} /> Sub-point</button>`}
+        ${canEdit && mine && html`<button class="chip-btn chip-btn--sm" onClick=${() => setMode("edit")}><${Icon} name="pencil" size=${12} /> Edit</button>`}
+        ${canEdit &&
+        !mine &&
+        html`<button class="chip-btn chip-btn--sm" onClick=${() => setMode("suggest")}><${Icon} name="pencil" size=${12} /> Suggest edit</button>
+          <button
+            class="chip-btn chip-btn--sm"
+            disabled=${mySuggestion?.kind === "remove"}
+            onClick=${() => store.suggest(docId, n.id, user, { kind: "remove" }).then(() => toast(`Asked ${firstName} to remove it`, { icon: "trash-2" }))}
+          >
+            <${Icon} name="x" size=${12} /> Suggest removal
+          </button>`}
+        ${!mine &&
+        isOwner &&
+        html`<button
+          class="chip-btn chip-btn--sm chip-btn--danger"
+          onClick=${async () => {
+            if (await ask({ title: `Delete ${firstName}'s note?`, body: `“${n.text.slice(0, 160)}” — as the owner you can remove any note. ${firstName} won't be able to undo this.`, confirm: "Delete", danger: true, icon: "trash-2" }))
+              store.deleteNote(docId, n.id);
+          }}
+        >
+          <${Icon} name="trash-2" size=${12} /> Delete
+        </button>`}
+        ${mine && canEdit && html`<${NoteActions} ctx=${ctx} note=${n} compact onEdit=${() => setMode("edit")} />`}
+      </div>
+    </div>
+  </div>`;
+}
+
 function Point({ ctx, item, fresh, index }) {
   const { user, nameOf, showTimes, showConflicts, mergeFrom, doc, docId, query, now, canEdit } = ctx;
   const [open, setOpen] = useState(false);
@@ -96,25 +198,12 @@ function Point({ ctx, item, fresh, index }) {
         ${item.authors.slice(0, 3).map((uid) => html`<span key=${uid} class="pt-dot" style=${{ "--who": colorFor(uid) }}>${nameOf(uid)[0]}</span>`)}
         ${item.authors.length > 3 && html`<span class="pt-dot pt-dot--more">+${item.authors.length - 3}</span>`}
       </span>
+      ${item.notes.some((n) => doc.suggestions?.[n.id]) && html`<span class="badge badge--suggest mono" title="Someone suggested a change">✎</span>`}
       ${showTimes && html`<time class="pt-time mono">${clock(item.createdAt)}</time>`}
     </div>
     ${open &&
     html`<div class="pt-detail">
-      ${item.notes.map(
-        (n) => html`<div class="pt-note" key=${n.id}>
-          <${Avatar} uid=${n.author} name=${nameOf(n.author)} size=${22} />
-          <div class="pt-note-body">
-            <div class="pt-note-head">
-              <b>${n.author === user.uid ? "You" : nameOf(n.author)}</b>
-              <span class="mono">${clock(n.createdAt)} · ${timeAgo(n.createdAt, now)}</span>
-              ${doc.merges?.[n.id] && html`<span class="badge badge--manual mono">hand-merged</span>`}
-              ${n.editedAt && html`<span class="mono muted">edited</span>`}
-            </div>
-            <p><${NoteText} text=${n.text} clash=${showConflicts ? item.clashNums : null} /></p>
-          </div>
-          ${n.author === user.uid && canEdit && html`<${NoteActions} ctx=${ctx} note=${n} compact />`}
-        </div>`,
-      )}
+      ${item.notes.map((n) => html`<${PointNote} key=${n.id} ctx=${ctx} n=${n} item=${item} />`)}
       ${item.conflicts.map((c) => {
         const other = doc.notes?.[c.other];
         if (!other) return null;
@@ -168,7 +257,9 @@ function SectionBlock({ ctx, s, fresh }) {
     <header class="w-sec-head">
       <span class="w-sec-num mono">${s.number}</span>
       <${H}>${s.title}<//>
-      ${isTarget && html`<span class="target-chip mono"><span class="dot-live" /> writing here</span>`}
+      ${isTarget
+        ? html`<span class="target-chip mono"><span class="dot-live" /> writing here</span>`
+        : canEdit && html`<button class="write-here mono" onClick=${() => ctx.focusComposer(s.id)}><${Icon} name="notebook-pen" size=${12} /> write here</button>`}
       <span class="w-sec-meta mono">
         ${writers.length > 0 &&
         html`<span class="writers" title=${writers.map((w) => w.name).join(", ")}>
@@ -233,11 +324,12 @@ export function WovenPage({ ctx }) {
     ${contributors.length > 0 &&
     html`<div class="credits">
       ${contributors.map(
-        (p) => html`<span class="credit" key=${p.uid} style=${{ "--who": colorFor(p.uid) }}>
+        (p) => html`<button class="credit" key=${p.uid} style=${{ "--who": colorFor(p.uid) }} onClick=${() => ctx.showStreamOf(p.uid)} title=${`Show ${p.uid === user.uid ? "your" : p.name + "'s"} stream`}>
           <${Avatar} ...${p} size=${20} />
-          <span>${p.uid === user.uid ? "You" : p.name}</span>
+          <span class="credit-name">${p.uid === user.uid ? "You" : p.name}</span>
+          <span class="credit-print">${p.name}</span>
           <span class="mono">${counts.get(p.uid)}</span>
-        </span>`,
+        </button>`,
       )}
     </div>`}
 

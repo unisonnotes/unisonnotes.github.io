@@ -6,47 +6,28 @@ import { html, useState, useEffect, useRef, useMemo, useLayoutEffect } from "./h
 import { Icon } from "./icons.js";
 import { Avatar, Menu, Kbd, toast, ask, clock, colorFor } from "./kit.js";
 import { NoteText } from "./text.js";
-import { NoteActions, sectionLabel } from "./woven.js";
+import { NoteActions, Suggestions, sectionLabel } from "./woven.js";
+import { EditBox } from "./editbox.js";
 import { parseInput, parseOutline, extractTags, nextOrder, headingParent, streamOutline, slug, MAX_DEPTH } from "../weave.js";
 import * as store from "../store.js";
+import { htmlToOutline } from "../importer.js";
 
 const HEADING_RE = /^(#{1,3})(?!#)/;
+// [label, Markdown wrapper, shortcut, icon]
+const FORMATS = [
+  ["Bold", "**", "Ctrl B", "bold"],
+  ["Italic", "*", "Ctrl I", "italic"],
+  ["Strikethrough", "~~", "Ctrl Shift X", "strikethrough"],
+  ["Highlight", "==", "Ctrl Shift H", "highlighter"],
+  ["Code", "`", "Ctrl E", "code"],
+];
 const clip = (s, n = 42) => (s.length > n ? s.slice(0, n - 1).trimEnd() + "…" : s);
 
 function SectionChip({ ctx, sid }) {
   const s = sid && ctx.doc.sections?.[sid];
-  return html`<span class=${"sec-chip mono" + (s ? "" : " sec-chip--none")}>${s ? s.title : "Unsorted"}</span>`;
+  return html`<button class=${"sec-chip mono" + (s ? "" : " sec-chip--none")} onClick=${(e) => (e.stopPropagation(), ctx.scrollToSection(sid || null))} title="Go to this topic">${s ? s.title : "Unsorted"}</button>`;
 }
 
-function EditBox({ initial, onSave, onCancel }) {
-  const [value, setValue] = useState(initial);
-  const ref = useRef(null);
-  useLayoutEffect(() => {
-    const el = ref.current;
-    el.focus();
-    el.setSelectionRange(el.value.length, el.value.length);
-  }, []);
-  useLayoutEffect(() => {
-    const el = ref.current;
-    el.style.height = "auto";
-    el.style.height = el.scrollHeight + "px";
-  }, [value]);
-  return html`<div class="edit-box">
-    <textarea
-      ref=${ref}
-      value=${value}
-      rows="1"
-      onInput=${(e) => setValue(e.target.value)}
-      onKeyDown=${(e) => {
-        if (e.key === "Enter" && !e.shiftKey) {
-          e.preventDefault();
-          value.trim() && onSave(value.trim());
-        } else if (e.key === "Escape") onCancel();
-      }}
-    />
-    <div class="edit-actions mono"><span><${Kbd}>↵<//> save · <${Kbd}>Esc<//> cancel</span></div>
-  </div>`;
-}
 
 function MyNote({ ctx, entry, prevSibling, fresh }) {
   const { note, depth, foreignParent } = entry;
@@ -73,14 +54,23 @@ function MyNote({ ctx, entry, prevSibling, fresh }) {
       onSelect: () => store.setNoteParent(ctx.docId, note.id, grand, placed),
     });
   }
+  const pending = Object.keys(ctx.doc.suggestions?.[note.id] || {}).length;
+  const locate = (e) => {
+    if (editing || e.target.closest("button, a, textarea, .menu") || window.getSelection()?.toString()) return;
+    ctx.showInWeave(note.id);
+  };
   return html`<li
-    class=${"my-note" + (depth ? " is-sub" : "") + (fresh ? " is-new" : "") + (editing ? " is-editing" : "") + (ctx.mergeFrom === note.id ? " is-merging" : "")}
+    id=${"my-" + note.id}
+    class=${"my-note" + (depth ? " is-sub" : "") + (fresh ? " is-new" : "") + (editing ? " is-editing" : "") + (ctx.mergeFrom === note.id ? " is-merging" : "") + (pending ? " has-suggestions" : "")}
     style=${{ "--depth": depth }}
+    onClick=${locate}
+    title="Click to find it in the woven doc"
   >
     <div class="my-note-head">
       ${depth === 0 ? html`<${SectionChip} ctx=${ctx} sid=${placed} />` : html`<span class="sub-mark mono">↳ sub-point</span>`}
       ${dup && html`<span class="badge badge--dup mono" title="Others wrote this too">×${item.authors.length}</span>`}
       ${conflict && html`<span class="badge badge--conflict mono" title="Differs from a similar note"><${Icon} name="triangle-alert" size=${11} /></span>`}
+      ${pending > 0 && html`<span class="badge badge--suggest mono" title="Someone suggested a change">${pending} suggestion${pending === 1 ? "" : "s"}</span>`}
       <time class="mono" title=${new Date(note.createdAt || Date.now()).toLocaleString()}>${clock(note.createdAt)}</time>
       ${!editing && html`<${NoteActions} ctx=${ctx} note=${note} compact onEdit=${() => setEditing(true)} extra=${extra} />`}
     </div>
@@ -95,6 +85,7 @@ function MyNote({ ctx, entry, prevSibling, fresh }) {
           }}
         />`
       : html`<p class="my-note-text" onDblClick=${() => setEditing(true)}><${NoteText} text=${note.text} /></p>`}
+    <${Suggestions} ctx=${ctx} note=${note} />
   </li>`;
 }
 
@@ -260,11 +251,18 @@ function Composer({ ctx }) {
   // Paste a whole outline: lines become bullets, indentation becomes sub-points, #/## lines become topics.
   const onPaste = async (e) => {
     const raw = e.clipboardData?.getData("text/plain") || "";
+    const rich = e.clipboardData?.getData("text/html") || "";
     if (raw.split(/\r?\n/).filter((l) => l.trim()).length < 2) return;
     e.preventDefault();
     const el = e.target;
     const [s, end] = [el.selectionStart, el.selectionEnd];
-    const items = parseOutline(raw);
+    // Copied out of Google Docs / Word / a web page: keep headings, lists and bold.
+    const fromRich = rich ? htmlToOutline(rich) : null;
+    const items = fromRich?.items.length
+      ? fromRich.title
+        ? [{ kind: "section", text: fromRich.title, level: 0 }, ...fromRich.items.map((it) => (it.kind === "section" ? { ...it, level: Math.min(it.level + 1, 2) } : it))]
+        : fromRich.items
+      : parseOutline(raw);
     const ok = await ask({
       title: `Add ${items.length} lines as separate notes?`,
       body: "Each line becomes its own bullet. Indented lines become sub-points, and lines starting with # or ## become topics.",
@@ -323,7 +321,10 @@ function Composer({ ctx }) {
     const [s, e] = [el.selectionStart, el.selectionEnd];
     const next = text.slice(0, s) + mark + text.slice(s, e) + mark + text.slice(e);
     setText(next);
-    requestAnimationFrame(() => el.setSelectionRange(s + mark.length, e + mark.length));
+    requestAnimationFrame(() => {
+      el.focus();
+      el.setSelectionRange(s + mark.length, e + mark.length);
+    });
   };
 
   const onKeyDown = (e) => {
@@ -337,9 +338,11 @@ function Composer({ ctx }) {
       setPick((p) => (p + (e.key === "ArrowDown" ? 1 : suggestions.length - 1)) % suggestions.length);
       return;
     }
-    if ((e.ctrlKey || e.metaKey) && !e.altKey && (e.key === "b" || e.key === "i")) {
+    const mod = (e.ctrlKey || e.metaKey) && !e.altKey;
+    const fmt = mod && FORMATS.find(([, , kbd]) => kbd.toLowerCase() === (e.shiftKey ? `ctrl shift ${e.key}` : `ctrl ${e.key}`).toLowerCase());
+    if (fmt) {
       e.preventDefault();
-      wrap(e.key === "b" ? "**" : "*");
+      wrap(fmt[1]);
       return;
     }
     if (e.key === "Tab") {
@@ -426,6 +429,13 @@ function Composer({ ctx }) {
         >
           <${Icon} name="hash" size=${13} /> ${topicLabel}
         </button>
+        <${Menu}
+          align="left"
+          width=${220}
+          class="format-menu"
+          trigger=${(open, toggle) => html`<button class=${"chip-btn" + (open ? " is-open" : "")} onMouseDown=${(e) => e.preventDefault()} onClick=${toggle} title="Formatting" aria-label="Formatting"><span class="aa">Aa</span></button>`}
+          items=${FORMATS.map(([label, mark, kbd, icon]) => ({ label, icon, kbd, onSelect: () => wrap(mark) }))}
+        />
         <span class="grow" />
         <button class=${"send-btn" + (parsed ? " is-ready" : "")} onClick=${send} disabled=${!parsed || sending} aria-label="Send" title="Send (Enter)">
           <${Icon} name=${isHeading ? "plus" : "arrow-up"} size=${16} stroke=${2.2} />
@@ -511,7 +521,7 @@ function StreamColumn({ ctx, p, col }) {
   const pres = online.get(p.uid);
   const here = pres?.section && doc.sections?.[pres.section]?.title;
   let lastSection;
-  return html`<section class=${"stream-col" + (p.uid === user.uid ? " is-me" : "")} style=${{ "--who": colorFor(p.uid), "--i": col }}>
+  return html`<section id=${"col-" + p.uid} class=${"stream-col" + (p.uid === user.uid ? " is-me" : "")} style=${{ "--who": colorFor(p.uid), "--i": col }}>
     <header class="stream-head">
       <${Avatar} ...${p} size=${30} online=${!!pres} />
       <div>
@@ -524,8 +534,15 @@ function StreamColumn({ ctx, p, col }) {
         const sid = woven.sectionOfNote.get(n.id) ?? null;
         const divider = depth === 0 && sid !== lastSection;
         if (depth === 0) lastSection = sid;
-        return html`${divider && html`<li class="stream-divider mono" key=${"d" + n.id}>${sid ? doc.sections[sid]?.title : "Unsorted"}</li>`}
-          <li class=${"stream-note" + (depth ? " is-sub" : "")} key=${n.id} style=${{ "--depth": depth }}>
+        return html`${divider && html`<li class="stream-divider mono" key=${"d" + n.id}><button onClick=${() => ctx.scrollToSection(sid)} title="Go to this topic">${sid ? doc.sections[sid]?.title : "Unsorted"}</button></li>`}
+          <li
+            id=${"sn-" + n.id}
+            class=${"stream-note" + (depth ? " is-sub" : "")}
+            key=${n.id}
+            style=${{ "--depth": depth }}
+            onClick=${(e) => !window.getSelection()?.toString() && !e.target.closest("a") && ctx.showInWeave(n.id)}
+            title="Show in the woven doc"
+          >
             ${showTimes && html`<time class="mono">${clock(n.createdAt)}</time>`}
             <p><${NoteText} text=${n.text} query=${query} /></p>
           </li>`;

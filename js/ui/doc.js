@@ -11,6 +11,9 @@ import { Spine } from "./spine.js";
 import { WovenPage } from "./woven.js";
 import { StreamPanel, StreamsView } from "./stream.js";
 import { Tour, TOUR_KEY } from "./tour.js";
+import { EditMode } from "./editor.js";
+import { ImportModal } from "./import.js";
+import { FONTS, SPACINGS, DEFAULT_STYLE, fontCss, styleVars } from "./format.js";
 import { weave, tagsNeedingSections, tagTitle, nextOrder, latestSection, toMarkdown, agendaToSections } from "../weave.js";
 import * as store from "../store.js";
 
@@ -73,6 +76,9 @@ function HelpModal({ open, onClose, onTour }) {
     ["Conflicts", "Similar notes with different numbers or dates are highlighted so someone can check."],
     ["Gaps", "Topics with few notes glow. Claim one to tell the group you're covering it."],
     ["Paraphrases", "Word matching can't catch every rewording. Use “Merge into…” on your note, then click the point it repeats."],
+    ["Others' notes", "Click a point to see who wrote what. Jump to their stream, suggest an edit or a removal (they accept or decline), or add a sub-point. The owner can delete any note."],
+    ["Edit mode", "Edit turns the woven notes into a final copy you can rewrite like a normal document, with fonts, sizes, colors, lists and alignment. One person types at a time; the streams stay untouched."],
+    ["Import", "File → Import brings in Word, Google Docs, Markdown or text files. Headings become topics and lists become notes."],
   ];
   const keys = [
     [html`<${Kbd}>↵<//>`, "Send bullet"],
@@ -256,16 +262,29 @@ function DocView({ user, doc, role, backend }) {
     return () => document.removeEventListener("keydown", onKey);
   }, [mergeFrom, canEdit]);
 
-  const scrollToSection = (sid) => {
-    if (view !== "woven") setView("woven");
-    setTimeout(() => {
-      const el = document.getElementById(sid ? `sec-${sid}` : "sec-unsorted");
-      el?.scrollIntoView({ behavior: "smooth", block: "start" });
-      el?.classList.remove("is-flash");
-      void el?.offsetWidth;
-      el?.classList.add("is-flash");
-    }, 30);
+  /** Switch view if needed, then scroll an element into view and flash it. */
+  const reveal = (nextView, id, opts = { block: "center", inline: "center" }) => {
+    const run = () => {
+      const el = document.getElementById(id);
+      if (!el) return false;
+      el.scrollIntoView({ behavior: "smooth", ...opts });
+      el.classList.remove("is-flash");
+      void el.offsetWidth;
+      el.classList.add("is-flash");
+      return true;
+    };
+    if (nextView && view !== nextView) setView(nextView);
+    let tries = 12;
+    const attempt = () => !run() && --tries > 0 && setTimeout(attempt, 50);
+    setTimeout(attempt, 30);
   };
+  const scrollToSection = (sid) => reveal("woven", sid ? `sec-${sid}` : "sec-unsorted", { block: "start" });
+  const showInWeave = (noteId) => {
+    const item = woven.groupOfNote.get(noteId);
+    if (item) reveal("woven", `pt-${item.id}`);
+  };
+  const showInStream = (noteId) => reveal("streams", `sn-${noteId}`);
+  const showStreamOf = (uid) => reveal("streams", `col-${uid}`, { block: "nearest", inline: "center" });
 
   const cycle = useRef({ conflict: -1, gap: -1 });
   const jumpTo = (kind) => {
@@ -308,8 +327,8 @@ function DocView({ user, doc, role, backend }) {
     toast("Markdown downloaded", { icon: "download" });
   };
   const exportPdf = () => {
-    setView("woven");
-    setTimeout(() => window.print(), 80);
+    if (view === "streams") setView("woven");
+    setTimeout(() => window.print(), 120);
   };
 
   const removeDoc = async () => {
@@ -367,21 +386,33 @@ function DocView({ user, doc, role, backend }) {
     },
     nestUnder: (noteId) => withComposer((api) => api.nestUnder(noteId)),
     startTopic,
+    showInWeave,
+    showInStream,
+    showStreamOf,
   };
 
   const stats = woven.stats;
   const gaps = woven.sections.filter((s) => s.heat >= 0.5).length;
   const onlinePeople = people.filter((p) => online.has(p.uid)).map((p) => ({ ...p, online: true, title: `${p.name}${p.uid === user.uid ? " (you)" : ""} · online` }));
+  const style = { ...DEFAULT_STYLE, ...(doc.style || {}) };
+  const setStyle = (patch) => canEdit && store.setStyle(docId, patch);
+  // Suggestions others left on my notes.
+  const forMe = Object.entries(doc.suggestions || {}).filter(([nid, s]) => doc.notes?.[nid]?.author === user.uid && s && Object.keys(s).some((u) => u !== user.uid));
+  const openSuggestions = () => {
+    setShowPanel(true);
+    reveal(null, `my-${forMe[0][0]}`, { block: "center" });
+  };
 
   const menus = [
     {
       label: "File",
       items: [
         { label: "New doc", icon: "file-plus", onSelect: () => go("/") },
+        { label: "Import into this doc…", hint: "Word, Google Docs, Markdown, text", icon: "file-up", disabled: !canEdit, onSelect: () => setModal("import") },
         { label: "Share…", icon: "user-plus", onSelect: () => setModal("share") },
         { sep: true },
         { label: "Download Markdown", hint: ".md with credits", icon: "download", onSelect: exportMarkdown },
-        { label: "Print / save as PDF", icon: "printer", kbd: "Ctrl P", onSelect: exportPdf },
+        { label: "Print / save as PDF", hint: view === "edit" ? "the final doc" : "the woven doc", icon: "printer", kbd: "Ctrl P", onSelect: exportPdf },
         { sep: true },
         ...(isOwner
           ? [
@@ -406,6 +437,7 @@ function DocView({ user, doc, role, backend }) {
       items: [
         { label: "Woven doc", icon: "file-text", checked: view === "woven", onSelect: () => setView("woven") },
         { label: "Everyone's streams", icon: "columns-3", checked: view === "streams", onSelect: () => setView("streams") },
+        { label: "Edit mode", hint: "final doc, like a word processor", icon: "file-pen-line", checked: view === "edit", onSelect: () => setView("edit") },
         { sep: true },
         { label: "Spine outline", icon: "list-tree", checked: showSpine, onSelect: () => setShowSpine((v) => !v) },
         { label: "My stream panel", icon: "notebook-pen", checked: showPanel, onSelect: () => setShowPanel((v) => !v) },
@@ -469,13 +501,34 @@ function DocView({ user, doc, role, backend }) {
         <button class=${"tool-btn" + (showSpine ? " is-on" : "")} onClick=${() => setShowSpine((v) => !v)} title="Spine outline" aria-label="Toggle spine"><${Icon} name="list-tree" /></button>
         <span class="tool-sep" />
         <div class="segmented segmented--tool" role="tablist" data-tour="views">
-          <button class=${view === "woven" ? "is-on" : ""} onClick=${() => setView("woven")}><${Icon} name="file-text" size=${14} /> Woven</button>
-          <button class=${view === "streams" ? "is-on" : ""} onClick=${() => setView("streams")}><${Icon} name="columns-3" size=${14} /> Streams</button>
+          <button class=${view === "woven" ? "is-on" : ""} onClick=${() => setView("woven")} title="Everyone's notes, woven together"><${Icon} name="file-text" size=${14} /> Woven</button>
+          <button class=${view === "streams" ? "is-on" : ""} onClick=${() => setView("streams")} title="Each person's raw notes"><${Icon} name="columns-3" size=${14} /> Streams</button>
+          <button class=${view === "edit" ? "is-on" : ""} onClick=${() => setView("edit")} title="A final copy you can edit like a normal document"><${Icon} name="file-pen-line" size=${14} /> Edit</button>
         </div>
+        ${view !== "streams" &&
+        html`<span class="tool-sep" />
+          <${Menu}
+            width=${210}
+            trigger=${(open, toggle) => html`<button class=${"tool-select" + (open ? " is-open" : "")} onClick=${toggle} disabled=${!canEdit} title="Document font">
+              <span style=${{ fontFamily: fontCss(style.font) }}>${FONTS.find((f) => f.id === style.font)?.name || "Geist"}</span><${Icon} name="chevron-down" size=${13} />
+            </button>`}
+            items=${[{ heading: "Document font" }, ...FONTS.map((f) => ({ label: html`<span style=${{ fontFamily: f.css }}>${f.name}</span>`, checked: f.id === style.font, onSelect: () => setStyle({ font: f.id }) }))]}
+          />
+          <span class="tool-size" title="Document text size">
+            <button class="tool-btn tool-btn--sm" disabled=${!canEdit || style.size <= 10} onClick=${() => setStyle({ size: style.size - 1 })} aria-label="Smaller text"><${Icon} name="minus" size=${14} /></button>
+            <span class="mono">${style.size}</span>
+            <button class="tool-btn tool-btn--sm" disabled=${!canEdit || style.size >= 28} onClick=${() => setStyle({ size: style.size + 1 })} aria-label="Larger text"><${Icon} name="plus" size=${14} /></button>
+          </span>
+          <${Menu}
+            width=${180}
+            trigger=${(open, toggle) => html`<button class=${"tool-btn" + (open ? " is-open" : "")} onClick=${toggle} disabled=${!canEdit} title="Line spacing" aria-label="Line spacing"><${Icon} name="a-large-small" /></button>`}
+            items=${[{ heading: "Line spacing" }, ...SPACINGS.map(([v, label]) => ({ label, checked: style.spacing === v, onSelect: () => setStyle({ spacing: v }) }))]}
+          />`}
         <span class="tool-sep" />
-        <span class="stat mono" title="Notes written / distinct points after collapsing duplicates"><b>${stats.notes}</b> notes <i>→</i> <b>${stats.points}</b> points</span>
-        <span class="stat mono" title="People who have written notes"><${Icon} name="users" size=${13} /> <b>${stats.contributors}</b></span>
-        ${stats.duplicates > 0 && html`<span class="stat stat--merge mono" title="Duplicate notes collapsed"><${Icon} name="git-merge" size=${13} /> <b>${stats.duplicates}</b> merged</span>`}
+        ${forMe.length > 0 &&
+        html`<button class="stat stat--btn stat--suggest mono" onClick=${openSuggestions} title="Others suggested changes to your notes">
+          <${Icon} name="pencil" size=${13} /> <b>${forMe.length}</b> for you
+        </button>`}
         <button class=${"stat stat--btn stat--warn mono" + (stats.conflicts ? "" : " is-zero")} onClick=${() => jumpTo("conflict")} disabled=${!stats.conflicts} title="Jump to next conflict">
           <${Icon} name="triangle-alert" size=${13} /> <b>${stats.conflicts}</b> conflict${stats.conflicts === 1 ? "" : "s"}
         </button>
@@ -507,8 +560,8 @@ function DocView({ user, doc, role, backend }) {
 
     <div class="doc-body">
       ${showSpine && html`<${Spine} ctx=${ctx} onAddSection=${() => startTopic(0)} onAgenda=${() => setModal("agenda")} />`}
-      <main class="canvas">
-        ${view === "woven" ? html`<${WovenPage} ctx=${ctx} />` : html`<${StreamsView} ctx=${ctx} />`}
+      <main class="canvas" style=${styleVars(style)}>
+        ${view === "edit" ? html`<${EditMode} ctx=${ctx} />` : view === "streams" ? html`<${StreamsView} ctx=${ctx} />` : html`<${WovenPage} ctx=${ctx} />`}
       </main>
       ${showPanel && html`<${StreamPanel} ctx=${ctx} onClose=${() => setShowPanel(false)} />`}
     </div>
@@ -517,6 +570,17 @@ function DocView({ user, doc, role, backend }) {
     <${ThemePicker} open=${modal === "theme"} onClose=${() => setModal(null)} />
     <${HelpModal} open=${modal === "help"} onClose=${() => setModal(null)} onTour=${() => (setModal(null), setTour(true))} />
     <${AgendaModal} open=${modal === "agenda"} onClose=${() => setModal(null)} onAdd=${addAgenda} />
+    <${ImportModal}
+      open=${modal === "import"}
+      onClose=${() => setModal(null)}
+      mode="append"
+      onImport=${async ({ items }) => {
+        const n = await store.importOutline(docId, user, items, { sections: doc.sections, contextSection: resolvedTarget });
+        setModal(null);
+        setTarget("auto");
+        toast(`Imported ${n} items`, { icon: "file-up" });
+      }}
+    />
     ${tour &&
     html`<${Tour}
       ctx=${ctx}

@@ -42,4 +42,11 @@ export const TEMPLATES = [
     blurb: "Each line of your agenda becomes a topic.",
     sections: null,
   },
+  {
+    id: "import",
+    name: "Import a doc",
+    icon: "file-up",
+    blurb: "Bring in Word, Google Docs, Markdown or text. It's sorted into topics and notes.",
+    sections: null,
+  },
 ];

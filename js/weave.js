@@ -521,3 +521,39 @@ export function toMarkdown(doc, woven, nameOf) {
 }
 
 const findText = (doc, noteId) => (doc.notes?.[noteId]?.text || "").replace(/\n+/g, " ");
+
+// ───────────── HTML (the editable doc) ─────────────
+
+const escapeHtml = (s) => s.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+
+/** Note text with light Markdown (**b**, *i*, _i_, ~~s~~, ==mark==, `code`, links) as safe HTML. */
+export function inlineHtml(text) {
+  const codes = [];
+  let s = escapeHtml(text).replace(/`([^`\n]+)`/g, (_, c) => `\u0000${codes.push(c) - 1}\u0000`);
+  s = s
+    .replace(/\*\*(?=\S)(.+?)(?<=\S)\*\*/g, "<strong>$1</strong>")
+    .replace(/~~(?=\S)(.+?)(?<=\S)~~/g, "<s>$1</s>")
+    .replace(/==(?=\S)(.+?)(?<=\S)==/g, "<mark>$1</mark>")
+    .replace(/(^|[^\p{L}\p{N}*])\*(?=\S)([^*\n]+?)(?<=\S)\*(?![\p{L}\p{N}*])/gu, "$1<em>$2</em>")
+    .replace(/(^|[^\p{L}\p{N}_])_(?=\S)([^_\n]+?)(?<=\S)_(?![\p{L}\p{N}_])/gu, "$1<em>$2</em>")
+    .replace(/https?:\/\/[^\s<>"')\]]+/g, (url) => `<a href="${url}">${url.replace(/^https?:\/\//, "")}</a>`)
+    .replace(/\n/g, "<br>");
+  return s.replace(/\u0000(\d+)\u0000/g, (_, i) => `<code>${codes[i]}</code>`);
+}
+
+/** The woven doc as plain document HTML: title, topic headings, nested bullet lists. */
+export function weaveToHtml(doc, woven, nameOf) {
+  const counts = new Map();
+  for (const n of Object.values(doc.notes || {})) counts.set(n.author, (counts.get(n.author) || 0) + 1);
+  const names = [...counts].sort((a, b) => b[1] - a[1]).map(([uid]) => escapeHtml(nameOf(uid)));
+  const list = (items) =>
+    items.length ? `<ul>${items.map((it) => `<li>${inlineHtml(it.rep.text)}${list(it.children)}</li>`).join("")}</ul>` : "";
+  const out = [`<h1>${escapeHtml(doc.meta.title)}</h1>`];
+  if (names.length) out.push(`<p class="doc-byline">Notes by ${names.join(", ")}</p>`);
+  for (const s of woven.sections) {
+    const h = `h${Math.min(2 + (s.depth || 0), 4)}`;
+    out.push(`<${h}>${escapeHtml(s.title)}</${h}>`, list(s.items));
+  }
+  if (woven.unsorted.length) out.push("<h2>Other notes</h2>", list(woven.unsorted));
+  return out.filter(Boolean).join("\n");
+}

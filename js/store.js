@@ -1,6 +1,8 @@
 // Domain operations over the backend adapter. Paths follow the data model in
 // README.md; database.rules.json enforces who may write each of them.
 
+import { headingParent, nextOrder, extractTags } from "./weave.js";
+
 let db = null;
 export function initStore(backend) {
   db = backend.db;
@@ -157,8 +159,97 @@ export const setNoteParent = (docId, noteId, parentId, sectionId) =>
     [`docs/${docId}/notes/${noteId}/sectionId`]: sectionId || null,
   });
 
+/** Authors delete their own notes; the owner can remove anyone's. Pending suggestions go too. */
 export const deleteNote = (docId, noteId) =>
-  db.update({ [`docs/${docId}/notes/${noteId}`]: null, [`docs/${docId}/merges/${noteId}`]: null });
+  db.update({
+    [`docs/${docId}/notes/${noteId}`]: null,
+    [`docs/${docId}/merges/${noteId}`]: null,
+    [`docs/${docId}/suggestions/${noteId}`]: null,
+  });
+
+// ───────────── Suggestions ─────────────
+// Others can't edit your notes; they suggest. suggestions/{noteId}/{uid}: {kind: "edit"|"remove", text?, name, at}
+
+export const suggest = (docId, noteId, user, { kind, text = null }) =>
+  db.set(`docs/${docId}/suggestions/${noteId}/${user.uid}`, { kind, text: kind === "edit" ? text : null, name: user.name, at: db.TIMESTAMP });
+
+export const dropSuggestion = (docId, noteId, uid) => db.remove(`docs/${docId}/suggestions/${noteId}/${uid}`);
+
+export async function acceptSuggestion(docId, noteId, uid, s, tags = []) {
+  if (s.kind === "remove") return deleteNote(docId, noteId);
+  await db.update({
+    [`docs/${docId}/notes/${noteId}/text`]: s.text,
+    [`docs/${docId}/notes/${noteId}/tags`]: tags.length ? tags : null,
+    [`docs/${docId}/notes/${noteId}/editedAt`]: db.TIMESTAMP,
+    [`docs/${docId}/suggestions/${noteId}/${uid}`]: null,
+  });
+}
+
+// ───────────── Page style & the editable doc ─────────────
+
+export const setStyle = (docId, patch) =>
+  db.update(Object.fromEntries(Object.entries(patch).map(([k, v]) => [`docs/${docId}/style/${k}`, v])));
+
+/** draft: {html, basedOn (newest note time it includes), updatedAt, updatedBy, updatedByName, lock: {uid, name, at}} */
+export const saveDraft = (docId, user, html, extra = {}) =>
+  db.update({
+    [`docs/${docId}/draft/html`]: html,
+    [`docs/${docId}/draft/updatedAt`]: db.TIMESTAMP,
+    [`docs/${docId}/draft/updatedBy`]: user.uid,
+    [`docs/${docId}/draft/updatedByName`]: user.name,
+    [`docs/${docId}/draft/lock`]: { uid: user.uid, name: user.name, at: db.TIMESTAMP },
+    ...Object.fromEntries(Object.entries(extra).map(([k, v]) => [`docs/${docId}/draft/${k}`, v])),
+  });
+
+export const lockDraft = (docId, user) => db.set(`docs/${docId}/draft/lock`, { uid: user.uid, name: user.name, at: db.TIMESTAMP });
+export const unlockDraft = (docId) => db.remove(`docs/${docId}/draft/lock`);
+export const discardDraft = (docId) => db.remove(`docs/${docId}/draft`);
+
+/**
+ * Add an imported outline in one write. Headings become topics (subtopics nest under
+ * the section in `contextSection`), notes nest by depth. Returns the item count.
+ */
+export async function importOutline(docId, user, items, { sections = {}, contextSection = null } = {}) {
+  const local = { ...(sections || {}) };
+  const updates = {};
+  let sectionCtx = contextSection;
+  let stack = [];
+  let tick = Date.now();
+  for (const it of items) {
+    if (it.kind === "section") {
+      const parent = headingParent(local, it.level, sectionCtx);
+      const order = nextOrder(local, parent);
+      const id = db.key();
+      updates[`docs/${docId}/sections/${id}`] = {
+        title: it.text,
+        createdBy: user.uid,
+        createdAt: db.TIMESTAMP,
+        order,
+        ...(parent ? { parentId: parent } : {}),
+      };
+      local[id] = { title: it.text, order, createdAt: tick++, ...(parent ? { parentId: parent } : {}) };
+      sectionCtx = id;
+      stack = [];
+      continue;
+    }
+    const d = Math.min(it.depth || 0, stack.length);
+    const parentId = d > 0 ? stack[d - 1] : null;
+    const id = db.key();
+    const tags = extractTags(it.text);
+    updates[`docs/${docId}/notes/${id}`] = {
+      author: user.uid,
+      authorName: user.name,
+      text: it.text,
+      sectionId: sectionCtx || null,
+      parentId,
+      tags: tags.length ? tags : null,
+      createdAt: db.TIMESTAMP,
+    };
+    stack = [...stack.slice(0, d), id];
+  }
+  await db.update(updates);
+  return items.length;
+}
 
 /** Hand-merge a paraphrase: `noteId` collapses into whatever group `targetId` is in. */
 export const mergeNotes = (docId, noteId, targetId) => db.set(`docs/${docId}/merges/${noteId}`, targetId);

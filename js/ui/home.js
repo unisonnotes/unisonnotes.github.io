@@ -6,7 +6,8 @@ import { Logo, Avatar, Menu, Modal, toast, ask, timeAgo, useNow, go } from "./ki
 import { ModeToggle, ThemePicker } from "./theme-picker.js";
 import { TEMPLATES } from "../templates.js";
 import { agendaToSections } from "../weave.js";
-import { watchMyDocs, watchDocMeta, createDoc, renameDoc, deleteDoc, leaveDoc, forgetDoc } from "../store.js";
+import { watchMyDocs, watchDocMeta, createDoc, renameDoc, deleteDoc, leaveDoc, forgetDoc, importOutline } from "../store.js";
+import { ImportModal } from "./import.js";
 
 export function AccountMenu({ user, backend, onTheme }) {
   return html`<${Menu}
@@ -363,7 +364,17 @@ export function Home({ user, backend }) {
 
     <button class="fab" onClick=${() => setTemplate(TEMPLATES[0])} aria-label="New doc" title="New doc"><${Icon} name="plus" size=${22} /></button>
 
-    <${NewDocModal} template=${template} onClose=${() => setTemplate(null)} onCreate=${create} />
+    <${NewDocModal} template=${template?.id === "import" ? null : template} onClose=${() => setTemplate(null)} onCreate=${create} />
+    <${ImportModal}
+      open=${template?.id === "import"}
+      onClose=${() => setTemplate(null)}
+      onImport=${async ({ title, items }) => {
+        const id = await createDoc(user, { title, sections: [] });
+        await importOutline(id, user, items);
+        setTemplate(null);
+        go(`/d/${id}`);
+      }}
+    />
     <${ThemePicker} open=${themeOpen} onClose=${() => setThemeOpen(false)} />
   </div>`;
 }

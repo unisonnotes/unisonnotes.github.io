@@ -9,6 +9,8 @@ import {
   toMarkdown,
   parseOutline,
   streamOutline,
+  inlineHtml,
+  weaveToHtml,
   orderedSections,
   headingParent,
   nextOrder,
@@ -261,4 +263,27 @@ test("markdown export credits writers and marks conflicts", () => {
   assert.match(md, /\*\*Contributors:\*\* Ana \(1\), Ben \(1\)/);
   assert.match(md, /## Dates/);
   assert.match(md, /⚠ Conflicts with/);
+});
+
+test("inline Markdown becomes safe HTML", () => {
+  assert.equal(
+    inlineHtml("**ATP** is *key*, ~~old~~ ==new== `x<y` <script> see https://a.com/b?c=1&d=2"),
+    '<strong>ATP</strong> is <em>key</em>, <s>old</s> <mark>new</mark> <code>x&lt;y</code> &lt;script&gt; see <a href="https://a.com/b?c=1&amp;d=2">a.com/b?c=1&amp;d=2</a>',
+  );
+});
+
+test("weave HTML keeps headings by depth and nested lists", () => {
+  const d = doc(
+    { a: { title: "Cells", order: 0, createdAt: 1 }, b: { title: "Cristae", order: 0, createdAt: 2, parentId: "a" } },
+    {
+      p: note("u1", "Mitochondria make **ATP**", "a", 10),
+      c: { ...note("u1", "via the ETC", "a", 11), parentId: "p" },
+      s: note("u2", "Folds", "b", 12),
+    },
+  );
+  const html = weaveToHtml(d, weave(d), (u) => ({ u1: "Ana", u2: "Ben" })[u]);
+  assert.match(html, /<h1>T<\/h1>/);
+  assert.match(html, /Notes by Ana, Ben/);
+  assert.match(html, /<h2>Cells<\/h2>\n<ul><li>Mitochondria make <strong>ATP<\/strong><ul><li>via the ETC<\/li><\/ul><\/li><\/ul>/);
+  assert.match(html, /<h3>Cristae<\/h3>/);
 });
